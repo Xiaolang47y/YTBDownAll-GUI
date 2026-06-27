@@ -26,6 +26,6 @@
 - 加入多语言支持
 
 #### 图廊
-<img width="900" height="728" alt="图片" src="https://github.com/user-attachments/assets/f368c5e2-327b-4385-aba7-e5a050092827" />
 <img width="900" height="728" alt="图片" src="https://github.com/user-attachments/assets/8a108383-e1db-4850-b096-62840d6d16ca" />
+<img width="900" height="728" alt="图片" src="https://github.com/user-attachments/assets/4dd86b98-02b4-4007-9787-50a661499117" />
 <img width="800" height="628" alt="图片" src="https://github.com/user-attachments/assets/812dc5fc-71b6-4b56-ad22-849e52481344" />
