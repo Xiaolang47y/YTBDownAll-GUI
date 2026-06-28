@@ -974,6 +974,7 @@ class ProgressWindow(tk.Toplevel):
         self.config_manager = config_manager
         self.parent = parent
         self.running = True
+        self.auto_scroll = True
         self.results = []
         
         self.create_widgets()
@@ -982,9 +983,6 @@ class ProgressWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
     
     def create_widgets(self):
-        self.progress_label = ttk.Label(self, text="准备下载...")
-        self.progress_label.pack(fill=tk.X, padx=10, pady=5)
-        
         log_frame = ttk.Frame(self)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
@@ -993,15 +991,27 @@ class ProgressWindow(tk.Toplevel):
         self.log_text.config(state=tk.DISABLED)
         self.log_text.tag_config("success", foreground="green")
         self.log_text.tag_config("error", foreground="red")
+        self.log_text.tag_config("warning", foreground="orange")
+        
+        # 进度显示在日志下方
+        self.progress_label = ttk.Label(self, text="准备下载...", font=("", 9))
+        self.progress_label.pack(fill=tk.X, padx=10, pady=5)
         
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        self.abort_btn = ttk.Button(btn_frame, text="中止下载", command=self.abort_download)
+        self.abort_btn.pack(side=tk.LEFT, padx=5)
 
         self.retry_btn = ttk.Button(btn_frame, text="重试失败项", command=self.retry_failed, state=tk.DISABLED)
         self.retry_btn.pack(side=tk.LEFT, padx=5)
 
         self.history_btn = ttk.Button(btn_frame, text="历史记录", command=self.show_history)
         self.history_btn.pack(side=tk.LEFT, padx=5)
+
+        self.auto_scroll_var = tk.BooleanVar(value=True)
+        self.auto_scroll_check = ttk.Checkbutton(btn_frame, text="自动滚动", variable=self.auto_scroll_var, command=self.toggle_auto_scroll)
+        self.auto_scroll_check.pack(side=tk.RIGHT, padx=5)
 
         self.close_btn = ttk.Button(btn_frame, text="关闭", command=self.destroy, state=tk.DISABLED)
         self.close_btn.pack(side=tk.RIGHT, padx=5)
@@ -1012,8 +1022,17 @@ class ProgressWindow(tk.Toplevel):
             self.log_text.insert(tk.END, message + "\n", tag)
         else:
             self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
+        if self.auto_scroll:
+            self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
+    
+    def toggle_auto_scroll(self):
+        self.auto_scroll = self.auto_scroll_var.get()
+    
+    def abort_download(self):
+        self.running = False
+        self.abort_btn.config(state=tk.DISABLED)
+        self.log("用户中止下载...", "error")
     
     def start_download(self):
         thread = threading.Thread(target=self.download_thread, daemon=True)
@@ -1051,7 +1070,9 @@ class ProgressWindow(tk.Toplevel):
             status = "✓" if result['success'] else "✗ [失败]"
             title = result.get('title', '未知标题')
             url = result['url']
-            self.after(0, lambda msg=f"  {idx}. {status} {title} | {url}": self.log(msg, "success" if result['success'] else "error"))
+            has_sub = result.get('has_sub', False)
+            sub_tag = " [字幕]" if has_sub else ""
+            self.after(0, lambda msg=f"  {idx}. {status}{sub_tag} {title} | {url}": self.log(msg, "success" if result['success'] else "error"))
         
         self.after(0, lambda: self.progress_label.config(text=f"下载完成！成功: {success} / 失败: {failed}"))
         
@@ -1090,7 +1111,7 @@ class ProgressWindow(tk.Toplevel):
         elif cookie_type == "chrome":
             cmd.extend(["--cookies-from-browser", "chrome"])
         
-        cmd.extend(["--retries", "infinite", "--fragment-retries", "infinite", "--sleep-interval", "3"])
+        cmd.extend(["--retries", "infinite", "--fragment-retries", "infinite", "--sleep-interval", "3", "--progress"])
         
         save_dir = self.config_manager.get("save_dir", os.getcwd())
         output_template = os.path.join(save_dir, "%(title)s.%(ext)s")
@@ -1137,26 +1158,37 @@ class ProgressWindow(tk.Toplevel):
                     process.terminate()
                     break
                 line = line.rstrip()
-                if line:
+                if not line:
+                    continue
+                
+                # 进度行更新到底部标签，不写入日志
+                if "[download]" in line and ("%" in line or "at " in line):
+                    progress = line.replace("[download]", "").strip()
+                    self.after(0, lambda msg=progress: self.progress_label.config(text=msg))
+                elif "[download] Destination:" in line:
+                    filename = line.split("[download] Destination:")[-1].strip()
+                    title = os.path.splitext(os.path.basename(filename))[0]
                     self.after(0, lambda msg=line: self.log(msg))
-                    if "[download] Destination:" in line:
-                        filename = line.split("[download] Destination:")[-1].strip()
-                        title = os.path.splitext(os.path.basename(filename))[0]
-                    elif "Already downloaded" in line:
-                        match = re.search(r"Already downloaded.*?['\"](.+?)['\"]", line)
-                        if match:
-                            title = os.path.splitext(os.path.basename(match.group(1)))[0]
+                elif "Already downloaded" in line:
+                    match = re.search(r"Already downloaded.*?['\"](.+?)['\"]", line)
+                    if match:
+                        title = os.path.splitext(os.path.basename(match.group(1)))[0]
+                    self.after(0, lambda msg=line: self.log(msg))
+                elif "WARNING" in line:
+                    self.after(0, lambda msg=line: self.log(msg, "warning"))
+                else:
+                    self.after(0, lambda msg=line: self.log(msg))
             
             process.wait()
             
             if process.returncode == 0:
                 if not title:
                     title = self.find_latest_title(save_dir)
-                return {"success": True, "url": url, "title": title or "未知标题"}
+                return {"success": True, "url": url, "title": title or "未知标题", "has_sub": has_subs}
             else:
-                return {"success": False, "url": url, "error": f"退出码: {process.returncode}"}
+                return {"success": False, "url": url, "error": f"退出码: {process.returncode}", "has_sub": has_subs}
         except Exception as e:
-            return {"success": False, "url": url, "error": str(e)}
+            return {"success": False, "url": url, "error": str(e), "has_sub": has_subs}
     
     def find_latest_title(self, save_dir):
         try:
@@ -1531,7 +1563,25 @@ class MainApplication(tk.Tk):
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        # 绑定鼠标滚轮到 canvas 区域（Linux 使用 Button-4/5，Windows/Mac 使用 MouseWheel）
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        def _on_linux_scroll_up(event):
+            canvas.yview_scroll(-3, "units")
+        
+        def _on_linux_scroll_down(event):
+            canvas.yview_scroll(3, "units")
+        
+        # Windows/Mac
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        self.scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
+        
+        # Linux
+        canvas.bind("<Button-4>", _on_linux_scroll_up)
+        canvas.bind("<Button-5>", _on_linux_scroll_down)
+        self.scrollable_frame.bind("<Button-4>", _on_linux_scroll_up)
+        self.scrollable_frame.bind("<Button-5>", _on_linux_scroll_down)
     
     def parse_links(self):
         for widget in self.scrollable_frame.winfo_children():
