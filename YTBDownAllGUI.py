@@ -650,6 +650,8 @@ class FirstRunWizard(tk.Toplevel):
                 set_config_dir(new_dir)
                 # 重新加载配置管理器
                 self.config_manager = ConfigManager()
+                # 同步更新历史目录到新配置目录下
+                self.config_manager.set("history_dir", str(HISTORY_DIR))
         elif self.current_step == 2:  # yt-dlp 步骤
             self.config_manager.set("yt_dlp_path", self.yt_path_var.get())
         elif self.current_step == 3:  # ffmpeg 步骤
@@ -1036,6 +1038,12 @@ class SettingsWindow(tk.Toplevel):
             self.py_env_frame["result_label"].config(text="✗ 未找到", foreground="red")
     
     def save_settings(self):
+        new_config_dir = self.config_dir_var.get()
+        if new_config_dir and new_config_dir != str(CONFIG_DIR):
+            set_config_dir(new_config_dir)
+            self.config_manager = ConfigManager()
+            self.config_manager.set("history_dir", str(HISTORY_DIR))
+        
         self.config_manager.set("save_dir", self.save_dir_var.get())
         self.config_manager.set("ask_save_dir", self.ask_save_dir_var.get())
         self.config_manager.set("max_concurrent", self.concurrent_var.get())
@@ -1164,27 +1172,7 @@ class ProgressWindow(tk.Toplevel):
                 self.after(0, lambda msg=f"✗ 下载失败: {result.get('error', '未知错误')}": self.log(msg, "error"))
         
         # 显示结果列表
-        self.after(0, lambda: self.log(f"\n{'='*60}"))
-        self.after(0, lambda: self.log(f"下载完成！成功: {success} / 失败: {failed}"))
-        self.after(0, lambda: self.log(f"{'='*60}\n"))
-        self.after(0, lambda: self.log("下载列表:"))
-        
-        for idx, result in enumerate(self.results, 1):
-            status = "✓" if result['success'] else "✗ [失败]"
-            title = result.get('title', '未知标题')
-            url = result['url']
-            has_sub = result.get('has_sub', False)
-            sub_tag = " [字幕]" if has_sub else ""
-            self.after(0, lambda msg=f"  {idx}. {status}{sub_tag} {title} | {url}": self.log(msg, "success" if result['success'] else "error"))
-        
-        self.after(0, lambda: self.progress_label.config(text=f"下载完成！成功: {success} / 失败: {failed}"))
-        
-        # 保存历史记录
-        self.after(0, lambda: self.save_history())
-        
-        if failed > 0:
-            self.after(0, lambda: self.retry_btn.config(state=tk.NORMAL))
-        self.after(0, lambda: self.close_btn.config(state=tk.NORMAL))
+        self.show_results(success, failed)
         
         # 置顶完成提示
         self.after(0, lambda: self.show_completion_dialog(success, failed))
@@ -1193,7 +1181,35 @@ class ProgressWindow(tk.Toplevel):
         bring_to_front(self)
         messagebox.showinfo("完成", f"下载完成！\n成功: {success}\n失败: {failed}", parent=self)
     
-    def download_item(self, item):
+    def show_results(self, success, failed):
+        """显示下载结果列表"""
+        self.log(f"\n{'='*60}")
+        self.log(f"下载完成！成功: {success} / 失败: {failed}")
+        self.log(f"{'='*60}\n")
+        self.log("下载列表:")
+        
+        for idx, result in enumerate(self.results, 1):
+            status = "✓" if result['success'] else "✗ [失败]"
+            title = result.get('title', '未知标题')
+            url = result['url']
+            has_sub = result.get('has_sub', False)
+            sub_tag = " [字幕]" if has_sub else ""
+            self.log(f"  {idx}. {status}{sub_tag} {title} | {url}", "success" if result['success'] else "error")
+        
+        self.progress_label.config(text=f"下载完成！成功: {success} / 失败: {failed}")
+        
+        # 保存历史记录
+        self.save_history()
+        
+        # 更新按钮状态
+        remaining_failed = len([r for r in self.results if not r['success']])
+        if remaining_failed > 0:
+            self.retry_btn.config(state=tk.NORMAL)
+        else:
+            self.retry_btn.config(state=tk.DISABLED)
+        self.close_btn.config(state=tk.NORMAL)
+    
+    def download_item(self, item, force=False):
         url = item['url']
         checks = item['checks']
         sub_langs = item.get('sub_langs', ['en', 'zh-Hans'])
@@ -1215,6 +1231,10 @@ class ProgressWindow(tk.Toplevel):
             cmd.extend(["--cookies-from-browser", "chrome"])
         
         cmd.extend(["--retries", "infinite", "--fragment-retries", "infinite", "--sleep-interval", "3", "--progress"])
+        
+        if force:
+            # 强制覆盖已有文件，确保重试真正重新下载
+            cmd.extend(["--force-overwrites", "--no-continue"])
         
         save_dir = self.config_manager.get("save_dir", os.getcwd())
         output_template = os.path.join(save_dir, "%(title)s.%(ext)s")
@@ -1245,6 +1265,18 @@ class ProgressWindow(tk.Toplevel):
         
         cmd.append(url)
         
+        # 记录执行的命令
+        self.after(0, lambda msg=f"执行命令: {' '.join(cmd)}": self.log(msg))
+        
+        # 记录下载前目录中的字幕文件，用于判断本次是否实际下载了字幕
+        sub_only = has_subs and not checks.get("video") and not checks.get("audio") and not checks.get("cover")
+        sub_files_before = set()
+        if sub_only:
+            try:
+                sub_files_before = set(Path(save_dir).glob("*.srt")) | set(Path(save_dir).glob("*.vtt"))
+            except:
+                pass
+        
         try:
             process = subprocess.Popen(
                 cmd,
@@ -1256,6 +1288,7 @@ class ProgressWindow(tk.Toplevel):
             )
             
             title = None
+            sub_downloaded = False
             for line in process.stdout:
                 if not self.running:
                     process.terminate()
@@ -1271,11 +1304,16 @@ class ProgressWindow(tk.Toplevel):
                 elif "[download] Destination:" in line:
                     filename = line.split("[download] Destination:")[-1].strip()
                     title = os.path.splitext(os.path.basename(filename))[0]
+                    if filename.endswith(('.srt', '.vtt')):
+                        sub_downloaded = True
                     self.after(0, lambda msg=line: self.log(msg))
                 elif "Already downloaded" in line:
                     match = re.search(r"Already downloaded.*?['\"](.+?)['\"]", line)
                     if match:
-                        title = os.path.splitext(os.path.basename(match.group(1)))[0]
+                        filename = match.group(1)
+                        title = os.path.splitext(os.path.basename(filename))[0]
+                        if filename.endswith(('.srt', '.vtt')):
+                            sub_downloaded = True
                     self.after(0, lambda msg=line: self.log(msg))
                 elif "WARNING" in line:
                     self.after(0, lambda msg=line: self.log(msg, "warning"))
@@ -1286,17 +1324,29 @@ class ProgressWindow(tk.Toplevel):
             
             if process.returncode == 0:
                 if not title:
-                    title = self.find_latest_title(save_dir)
+                    title = self.find_latest_title(save_dir, sub_only=sub_only)
+                
+                # 如果只下载字幕，检查是否有新的字幕文件生成
+                if sub_only:
+                    found_sub = self.find_new_subtitle_files(save_dir, sub_files_before, title)
+                    if not found_sub:
+                        return {"success": False, "url": url, "title": title or "未知标题", "error": "未找到可下载的字幕", "has_sub": has_subs}
+                
                 return {"success": True, "url": url, "title": title or "未知标题", "has_sub": has_subs}
             else:
                 return {"success": False, "url": url, "error": f"退出码: {process.returncode}", "has_sub": has_subs}
         except Exception as e:
             return {"success": False, "url": url, "error": str(e), "has_sub": has_subs}
     
-    def find_latest_title(self, save_dir):
+    def find_latest_title(self, save_dir, sub_only=False):
+        """查找最近修改的文件标题"""
         try:
             files = []
-            for ext in ['*.mp4', '*.mkv', '*.webm', '*.mp3', '*.m4a']:
+            if sub_only:
+                exts = ['*.srt', '*.vtt']
+            else:
+                exts = ['*.mp4', '*.mkv', '*.webm', '*.mp3', '*.m4a', '*.jpg', '*.png', '*.srt', '*.vtt']
+            for ext in exts:
                 files.extend(Path(save_dir).glob(ext))
             if files:
                 latest = max(files, key=os.path.getmtime)
@@ -1304,6 +1354,23 @@ class ProgressWindow(tk.Toplevel):
         except:
             pass
         return None
+    
+    def find_new_subtitle_files(self, save_dir, sub_files_before, title):
+        """检查本次下载是否有新的字幕文件生成"""
+        try:
+            current_files = set(Path(save_dir).glob("*.srt")) | set(Path(save_dir).glob("*.vtt"))
+            new_files = current_files - sub_files_before
+            if new_files:
+                return True
+            # 如果没有新文件，但文件已存在且标题匹配，也算成功
+            if title and title != "未知标题":
+                for ext in ['*.srt', '*.vtt']:
+                    for f in current_files:
+                        if title in f.name:
+                            return True
+        except:
+            pass
+        return False
     
     def save_history(self):
         history_count = self.config_manager.get("history_count", 1)
@@ -1344,6 +1411,9 @@ class ProgressWindow(tk.Toplevel):
         thread.start()
     
     def retry_thread(self, failed_items):
+        success = 0
+        failed = 0
+        
         for item in failed_items:
             if not self.running:
                 break
@@ -1352,19 +1422,24 @@ class ProgressWindow(tk.Toplevel):
             
             original = next((i for i in self.download_items if i['url'] == item['url']), None)
             if original:
-                result = self.download_item(original)
+                result = self.download_item(original, force=True)
                 for r in self.results:
                     if r['url'] == item['url']:
                         r.update(result)
                         break
                 
                 if result['success']:
+                    success += 1
                     self.after(0, lambda msg=f"✓ 重试成功: {result.get('title', '未知标题')}": self.log(msg, "success"))
                 else:
+                    failed += 1
                     self.after(0, lambda msg=f"✗ 重试失败: {result.get('error', '未知错误')}": self.log(msg, "error"))
         
-        self.after(0, lambda: self.retry_btn.config(state=tk.NORMAL))
-        self.after(0, lambda: messagebox.showinfo("完成", "重试完成", parent=self))
+        # 刷新结果列表显示
+        total_success = len([r for r in self.results if r['success']])
+        total_failed = len([r for r in self.results if not r['success']])
+        self.after(0, lambda s=total_success, f=total_failed: self.show_results(s, f))
+        self.after(0, lambda: messagebox.showinfo("完成", f"重试完成！\n成功: {success}\n失败: {failed}", parent=self))
     
     def on_close(self):
         self.running = False
