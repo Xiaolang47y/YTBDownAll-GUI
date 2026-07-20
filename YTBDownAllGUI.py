@@ -60,6 +60,10 @@ DEFAULT_CONFIG = {
     "max_concurrent": 1,
     "history_count": 1,
     "history_dir": "",  # 默认为空，使用 CONFIG_DIR/history
+    "skip_video_lists": True,  # 不下载视频列表（播放列表/频道页）
+    "skip_live": True,  # 检测到直播时跳过
+    "link_subtitle_keyword": False,  # 是否启用链接行尾字幕关键字识别
+    "link_subtitle_format": "srt",  # 行尾字幕关键字识别时默认勾选 SRT 或 VTT
     "yt_dlp_path": "",
     "ffmpeg_path": "",
     "deno_path": ""
@@ -755,6 +759,28 @@ class SettingsWindow(tk.Toplevel):
         ttk.Checkbutton(check_frame, text="VTT 字幕", variable=self.vtt_check_var).grid(row=1, column=1, sticky=tk.W, padx=5)
         ttk.Checkbutton(check_frame, text="音频", variable=self.audio_check_var).grid(row=2, column=0, sticky=tk.W, padx=5)
         
+        # 链接行尾字幕关键字识别
+        link_sub_frame = ttk.LabelFrame(download_frame, text="链接字幕识别", padding=10)
+        link_sub_frame.grid(row=5, column=0, columnspan=3, sticky=tk.W+tk.E, pady=10)
+        
+        self.link_subtitle_keyword_var = tk.BooleanVar(value=self.config_manager.get("link_subtitle_keyword", False))
+        ttk.Checkbutton(link_sub_frame, text="启用链接行尾字幕关键字识别", variable=self.link_subtitle_keyword_var).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5)
+        ttk.Label(link_sub_frame, text="示例: https://example.com/123 字幕", foreground="gray").grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=5)
+        
+        self.link_subtitle_format_var = tk.StringVar(value=self.config_manager.get("link_subtitle_format", "srt"))
+        ttk.Radiobutton(link_sub_frame, text="默认勾选 SRT", variable=self.link_subtitle_format_var, value="srt").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Radiobutton(link_sub_frame, text="默认勾选 VTT", variable=self.link_subtitle_format_var, value="vtt").grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
+        
+        # 跳过选项
+        skip_frame = ttk.LabelFrame(download_frame, text="跳过选项", padding=10)
+        skip_frame.grid(row=6, column=0, columnspan=3, sticky=tk.W+tk.E, pady=10)
+        
+        self.skip_video_lists_var = tk.BooleanVar(value=self.config_manager.get("skip_video_lists", True))
+        ttk.Checkbutton(skip_frame, text="不下载视频列表（播放列表 / 频道页）", variable=self.skip_video_lists_var).grid(row=0, column=0, sticky=tk.W, padx=5)
+        
+        self.skip_live_var = tk.BooleanVar(value=self.config_manager.get("skip_live", True))
+        ttk.Checkbutton(skip_frame, text="检测到直播时跳过下载", variable=self.skip_live_var).grid(row=1, column=0, sticky=tk.W, padx=5)
+        
         # Cookie 设置
         cookie_frame = ttk.Frame(notebook, padding=10)
         notebook.add(cookie_frame, text="Cookie 设置")
@@ -1051,6 +1077,10 @@ class SettingsWindow(tk.Toplevel):
         self.config_manager.set("cookie_file", self.cookie_file_var.get())
         self.config_manager.set("history_count", self.history_count_var.get())
         self.config_manager.set("history_dir", self.history_dir_var.get())
+        self.config_manager.set("skip_video_lists", self.skip_video_lists_var.get())
+        self.config_manager.set("skip_live", self.skip_live_var.get())
+        self.config_manager.set("link_subtitle_keyword", self.link_subtitle_keyword_var.get())
+        self.config_manager.set("link_subtitle_format", self.link_subtitle_format_var.get())
         
         self.config_manager.set("default_checks", {
             "video": self.video_check_var.get(),
@@ -1087,6 +1117,8 @@ class ProgressWindow(tk.Toplevel):
         self.running = True
         self.auto_scroll = True
         self.results = []
+        self.current_process = None
+        self.skip_current = False
         
         self.create_widgets()
         self.start_download()
@@ -1113,6 +1145,9 @@ class ProgressWindow(tk.Toplevel):
 
         self.abort_btn = ttk.Button(btn_frame, text="中止下载", command=self.abort_download)
         self.abort_btn.pack(side=tk.LEFT, padx=5)
+
+        self.skip_btn = ttk.Button(btn_frame, text="终止当前下载项", command=self.skip_current_item)
+        self.skip_btn.pack(side=tk.LEFT, padx=5)
 
         self.retry_btn = ttk.Button(btn_frame, text="重试失败项", command=self.retry_failed, state=tk.DISABLED)
         self.retry_btn.pack(side=tk.LEFT, padx=5)
@@ -1142,8 +1177,26 @@ class ProgressWindow(tk.Toplevel):
     
     def abort_download(self):
         self.running = False
+        if self.current_process and self.current_process.poll() is None:
+            try:
+                self.current_process.terminate()
+            except:
+                pass
         self.abort_btn.config(state=tk.DISABLED)
+        self.skip_btn.config(state=tk.DISABLED)
         self.log("用户中止下载...", "error")
+    
+    def skip_current_item(self):
+        """终止当前正在下载的项"""
+        if self.current_process and self.current_process.poll() is None:
+            try:
+                self.current_process.terminate()
+                self.skip_current = True
+                self.log("用户终止当前下载项...", "error")
+            except Exception as e:
+                self.log(f"终止当前项失败: {e}", "error")
+        else:
+            self.log("当前没有正在下载的项", "warning")
     
     def start_download(self):
         thread = threading.Thread(target=self.download_thread, daemon=True)
@@ -1163,8 +1216,14 @@ class ProgressWindow(tk.Toplevel):
             
             result = self.download_item(item)
             self.results.append(result)
+            self.skip_current = False
+            self.current_process = None
             
-            if result['success']:
+            if result.get('live'):
+                # 直播跳过，计入失败但显示特殊信息
+                failed += 1
+                self.after(0, lambda msg=f"✗ 检测到直播，跳过下载: {result.get('title', '未知标题')}": self.log(msg, "error"))
+            elif result['success']:
                 success += 1
                 self.after(0, lambda msg=f"✓ 下载成功: {result.get('title', '未知标题')}": self.log(msg, "success"))
             else:
@@ -1189,12 +1248,17 @@ class ProgressWindow(tk.Toplevel):
         self.log("下载列表:")
         
         for idx, result in enumerate(self.results, 1):
-            status = "✓" if result['success'] else "✗ [失败]"
-            title = result.get('title', '未知标题')
-            url = result['url']
-            has_sub = result.get('has_sub', False)
-            sub_tag = " [字幕]" if has_sub else ""
-            self.log(f"  {idx}. {status}{sub_tag} {title} | {url}", "success" if result['success'] else "error")
+            if result.get('live'):
+                # 直播跳过项用红色高亮
+                msg = f"  {idx}. [检测到直播，跳过下载] {result.get('title', '未知标题')} | {result['url']}"
+                self.log(msg, "error")
+            else:
+                status = "✓" if result['success'] else "✗ [失败]"
+                title = result.get('title', '未知标题')
+                url = result['url']
+                has_sub = result.get('has_sub', False)
+                sub_tag = " [字幕]" if has_sub else ""
+                self.log(f"  {idx}. {status}{sub_tag} {title} | {url}", "success" if result['success'] else "error")
         
         self.progress_label.config(text=f"下载完成！成功: {success} / 失败: {failed}")
         
@@ -1202,17 +1266,67 @@ class ProgressWindow(tk.Toplevel):
         self.save_history()
         
         # 更新按钮状态
-        remaining_failed = len([r for r in self.results if not r['success']])
+        remaining_failed = len([r for r in self.results if not r['success'] and not r.get('skipped')])
         if remaining_failed > 0:
             self.retry_btn.config(state=tk.NORMAL)
         else:
             self.retry_btn.config(state=tk.DISABLED)
         self.close_btn.config(state=tk.NORMAL)
     
+    def check_url_type(self, url):
+        """检测 URL 类型，返回 'video'、'live'、'list' 或 'unknown'"""
+        yt_dlp = self.config_manager.get("yt_dlp_path", "yt-dlp") or "yt-dlp"
+        lowered = url.lower()
+        
+        # 明确的播放列表/频道页面直接判定为列表
+        if any(k in lowered for k in ["playlist?", "/channel/", "/c/", "/user/", "/@"]):
+            return "list", ""
+        
+        # watch 页面但包含播放列表参数（YouTube Mix / 播放列表）也判定为列表
+        if "list=" in lowered or "start_radio" in lowered:
+            return "list", ""
+        
+        try:
+            # 常规检测（单视频）
+            cmd = [yt_dlp, "--dump-json", "--no-warnings", url]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if result.returncode != 0:
+                return "unknown", ""
+            
+            lines = [l for l in result.stdout.strip().split('\n') if l.strip()]
+            if not lines:
+                return "unknown", ""
+            
+            data = json.loads(lines[0])
+            
+            # 检测直播
+            if data.get("is_live") or data.get("live_status") == "is_live":
+                return "live", data.get("title", "")
+            
+            # 检测播放列表/频道
+            if data.get("_type") == "playlist" or data.get("playlist_count", 0) > 1 or "entries" in data:
+                return "list", data.get("title", "")
+            
+            return "video", data.get("title", "")
+        except Exception:
+            return "unknown", ""
+    
     def download_item(self, item, force=False):
         url = item['url']
         checks = item['checks']
         sub_langs = item.get('sub_langs', ['en', 'zh-Hans'])
+        
+        # 检测 URL 类型
+        self.after(0, lambda msg=f"检测 URL 类型: {url}": self.log(msg))
+        url_type, title = self.check_url_type(url)
+        self.after(0, lambda msg=f"URL 类型检测结果: {url_type}": self.log(msg))
+        
+        # 检测到直播时跳过
+        if url_type == "live" and self.config_manager.get("skip_live", True):
+            return {"success": False, "url": url, "title": title or "未知标题", "error": "检测到直播，已跳过", "has_sub": False, "skipped": True, "live": True}
+        
+        # 如果是不下载视频列表模式且 URL 是列表，则只下载当前视频
+        no_playlist = (url_type == "list" and self.config_manager.get("skip_video_lists", True))
         
         yt_dlp = self.config_manager.get("yt_dlp_path", "yt-dlp")
         if not yt_dlp:
@@ -1235,6 +1349,11 @@ class ProgressWindow(tk.Toplevel):
         if force:
             # 强制覆盖已有文件，确保重试真正重新下载
             cmd.extend(["--force-overwrites", "--no-continue"])
+        
+        if no_playlist:
+            # 只下载当前视频，不下载播放列表
+            cmd.extend(["--no-playlist"])
+            self.after(0, lambda msg="检测到视频列表参数，仅下载当前视频": self.log(msg))
         
         save_dir = self.config_manager.get("save_dir", os.getcwd())
         output_template = os.path.join(save_dir, "%(title)s.%(ext)s")
@@ -1278,7 +1397,7 @@ class ProgressWindow(tk.Toplevel):
                 pass
         
         try:
-            process = subprocess.Popen(
+            self.current_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1289,9 +1408,12 @@ class ProgressWindow(tk.Toplevel):
             
             title = None
             sub_downloaded = False
-            for line in process.stdout:
+            for line in self.current_process.stdout:
                 if not self.running:
-                    process.terminate()
+                    self.current_process.terminate()
+                    break
+                if self.skip_current:
+                    self.current_process.terminate()
                     break
                 line = line.rstrip()
                 if not line:
@@ -1320,9 +1442,12 @@ class ProgressWindow(tk.Toplevel):
                 else:
                     self.after(0, lambda msg=line: self.log(msg))
             
-            process.wait()
+            self.current_process.wait()
             
-            if process.returncode == 0:
+            if self.skip_current:
+                return {"success": False, "url": url, "title": title or "未知标题", "error": "用户终止当前下载项", "has_sub": has_subs}
+            
+            if self.current_process.returncode == 0:
                 if not title:
                     title = self.find_latest_title(save_dir, sub_only=sub_only)
                 
@@ -1334,7 +1459,7 @@ class ProgressWindow(tk.Toplevel):
                 
                 return {"success": True, "url": url, "title": title or "未知标题", "has_sub": has_subs}
             else:
-                return {"success": False, "url": url, "error": f"退出码: {process.returncode}", "has_sub": has_subs}
+                return {"success": False, "url": url, "error": f"退出码: {self.current_process.returncode}", "has_sub": has_subs}
         except Exception as e:
             return {"success": False, "url": url, "error": str(e), "has_sub": has_subs}
     
@@ -1769,22 +1894,38 @@ class MainApplication(tk.Tk):
         self.link_items.clear()
         
         text = self.link_input.get("1.0", tk.END)
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        raw_lines = [line.strip() for line in text.split('\n') if line.strip()]
         
         default_checks = self.config_manager.get("default_checks", {})
         default_sub_langs = self.config_manager.get("default_sub_langs", ["en", "zh-Hans"])
+        link_subtitle_keyword = self.config_manager.get("link_subtitle_keyword", False)
+        link_subtitle_format = self.config_manager.get("link_subtitle_format", "srt")
         
         # 添加表头行（列全选复选框）
         header = HeaderRow(self.scrollable_frame, default_checks)
         header.pack(fill=tk.X, pady=2)
         
-        for url in lines:
+        for line in raw_lines:
+            # 解析行尾字幕关键字
+            url = line
+            has_sub_keyword = False
+            if link_subtitle_keyword:
+                parts = line.split()
+                if len(parts) >= 2 and parts[-1] == "字幕":
+                    url = " ".join(parts[:-1])
+                    has_sub_keyword = True
+            
             item = LinkItem(self.scrollable_frame, url, default_checks, default_sub_langs)
+            if has_sub_keyword:
+                if link_subtitle_format == "srt":
+                    item.srt_var.set(True)
+                else:
+                    item.vtt_var.set(True)
             item.pack(fill=tk.X, pady=2)
             self.link_items.append(item)
             header.add_link_item(item)
         
-        if not lines:
+        if not raw_lines:
             messagebox.showwarning("警告", "没有找到有效的链接", parent=self)
     
     def select_all(self):
