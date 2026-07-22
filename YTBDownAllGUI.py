@@ -64,6 +64,7 @@ DEFAULT_CONFIG = {
     "skip_live": True,  # 检测到直播时跳过
     "link_subtitle_keyword": False,  # 是否启用链接行尾字幕关键字识别
     "link_subtitle_format": "srt",  # 行尾字幕关键字识别时默认勾选 SRT 或 VTT
+    "legacy_server_connect": False,  # 是否使用 --legacy-server-connect 解决 SSL 握手失败
     "yt_dlp_path": "",
     "ffmpeg_path": "",
     "deno_path": ""
@@ -692,7 +693,8 @@ class SettingsWindow(tk.Toplevel):
     def __init__(self, parent, config_manager):
         super().__init__(parent)
         self.title("设置")
-        self.geometry("550x650")
+        self.geometry("600x720")
+        self.minsize(500, 400)
         self.config_manager = config_manager
         self.parent = parent
         
@@ -700,10 +702,60 @@ class SettingsWindow(tk.Toplevel):
         
         self.create_widgets()
         bring_to_front(self)
+    
+    def _make_scrollable_tab(self, notebook, tab_text):
+        """为 Notebook 标签页创建可滚动容器，inner 宽度跟随 outer 宽度变化"""
+        outer = ttk.Frame(notebook, padding=0)
+        notebook.add(outer, text=tab_text)
         
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        
+        def _update_scrollregion(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        
+        def _update_inner_width(event=None):
+            # 让 inner 宽度等于 canvas 可见宽度减去滚动条宽度
+            canvas_width = max(1, canvas.winfo_width() - scrollbar.winfo_width())
+            canvas.itemconfig(inner_id, width=canvas_width)
+        
+        inner.bind("<Configure>", _update_scrollregion)
+        outer.bind("<Configure>", lambda e: outer.after_idle(_update_inner_width))
+        canvas.bind("<Configure>", lambda e: outer.after_idle(_update_inner_width))
+        
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.grid(row=0, column=0, sticky=tk.W+tk.E+tk.N+tk.S)
+        scrollbar.grid(row=0, column=1, sticky=tk.N+tk.S)
+        outer.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+        
+        def _on_mousewheel(event, c=canvas):
+            c.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        def _on_linux_up(event, c=canvas):
+            c.yview_scroll(-3, "units")
+        
+        def _on_linux_down(event, c=canvas):
+            c.yview_scroll(3, "units")
+        
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        inner.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<Button-4>", _on_linux_up)
+        canvas.bind("<Button-5>", _on_linux_down)
+        inner.bind("<Button-4>", _on_linux_up)
+        inner.bind("<Button-5>", _on_linux_down)
+        
+        return inner
+    
     def create_widgets(self):
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        
         notebook = ttk.Notebook(self)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        notebook.grid(row=0, column=0, sticky=tk.W+tk.E+tk.N+tk.S, padx=10, pady=10)
         
         # 配置目录设置
         config_dir_frame = ttk.Frame(notebook, padding=10)
@@ -715,20 +767,19 @@ class SettingsWindow(tk.Toplevel):
         dir_entry_frame = ttk.Frame(config_dir_frame)
         dir_entry_frame.pack(fill=tk.X, pady=10)
         self.config_dir_var = tk.StringVar(value=str(CONFIG_DIR))
-        ttk.Entry(dir_entry_frame, textvariable=self.config_dir_var, width=40).pack(side=tk.LEFT, padx=5)
+        ttk.Entry(dir_entry_frame, textvariable=self.config_dir_var, width=45).pack(side=tk.LEFT, padx=5)
         ttk.Button(dir_entry_frame, text="浏览", command=self.browse_config_dir).pack(side=tk.LEFT, padx=2)
         ttk.Button(dir_entry_frame, text="打开", command=self.open_config_dir).pack(side=tk.LEFT, padx=2)
         
         ttk.Label(config_dir_frame, text="当前配置文件:", font=("", 10)).pack(anchor=tk.W, pady=(15, 2))
         ttk.Label(config_dir_frame, text=str(CONFIG_FILE), foreground="gray").pack(anchor=tk.W)
         
-        # 下载设置
-        download_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(download_frame, text="下载设置")
+        # 下载设置（可滚动）
+        download_frame = self._make_scrollable_tab(notebook, "下载设置")
         
         ttk.Label(download_frame, text="默认保存目录:").grid(row=0, column=0, sticky=tk.W, pady=5)
         self.save_dir_var = tk.StringVar(value=self.config_manager.get("save_dir", ""))
-        ttk.Entry(download_frame, textvariable=self.save_dir_var, width=40).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Entry(download_frame, textvariable=self.save_dir_var, width=45).grid(row=0, column=1, padx=5, pady=5)
         dir_btn_frame = ttk.Frame(download_frame)
         dir_btn_frame.grid(row=0, column=2, padx=5, pady=5)
         ttk.Button(dir_btn_frame, text="浏览", command=self.browse_save_dir).pack(side=tk.LEFT, padx=2)
@@ -781,6 +832,13 @@ class SettingsWindow(tk.Toplevel):
         self.skip_live_var = tk.BooleanVar(value=self.config_manager.get("skip_live", True))
         ttk.Checkbutton(skip_frame, text="检测到直播时跳过下载", variable=self.skip_live_var).grid(row=1, column=0, sticky=tk.W, padx=5)
         
+        # 网络设置
+        network_frame = ttk.LabelFrame(download_frame, text="网络设置", padding=10)
+        network_frame.grid(row=7, column=0, columnspan=3, sticky=tk.W+tk.E, pady=10)
+        
+        self.legacy_server_connect_var = tk.BooleanVar(value=self.config_manager.get("legacy_server_connect", False))
+        ttk.Checkbutton(network_frame, text="使用 --legacy-server-connect（解决 SSLV3_ALERT_HANDSHAKE_FAILURE 错误）", variable=self.legacy_server_connect_var).grid(row=0, column=0, sticky=tk.W, padx=5)
+        
         # Cookie 设置
         cookie_frame = ttk.Frame(notebook, padding=10)
         notebook.add(cookie_frame, text="Cookie 设置")
@@ -827,7 +885,7 @@ class SettingsWindow(tk.Toplevel):
         dir_frame = ttk.Frame(history_frame)
         dir_frame.pack(fill=tk.X, pady=5)
         self.history_dir_var = tk.StringVar(value=self.config_manager.get("history_dir", str(HISTORY_DIR)))
-        ttk.Entry(dir_frame, textvariable=self.history_dir_var, width=40).pack(side=tk.LEFT, padx=5)
+        ttk.Entry(dir_frame, textvariable=self.history_dir_var, width=45).pack(side=tk.LEFT, padx=5)
         ttk.Button(dir_frame, text="浏览", command=self.browse_history_dir).pack(side=tk.LEFT, padx=2)
         ttk.Button(dir_frame, text="打开", command=self.open_history_dir).pack(side=tk.LEFT, padx=2)
         
@@ -836,12 +894,13 @@ class SettingsWindow(tk.Toplevel):
         ttk.Spinbox(history_frame, from_=0, to=100, textvariable=self.history_count_var, width=5).pack(anchor=tk.W, pady=5)
         ttk.Label(history_frame, text="(设置为 0 表示不保存历史记录)", foreground="gray").pack(anchor=tk.W)
         
-        # 环境检测
-        env_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(env_frame, text="环境检测")
+        # 环境检测（可滚动）
+        env_frame = self._make_scrollable_tab(notebook, "环境检测")
         
         self.env_notebook = ttk.Notebook(env_frame)
-        self.env_notebook.pack(fill=tk.BOTH, expand=True)
+        self.env_notebook.grid(row=0, column=0, sticky=tk.W+tk.E+tk.N+tk.S, pady=5)
+        env_frame.columnconfigure(0, weight=1)
+        env_frame.rowconfigure(0, weight=1)
         
         # yt-dlp 检测
         yt_frame = ttk.Frame(self.env_notebook, padding=10)
@@ -864,11 +923,11 @@ class SettingsWindow(tk.Toplevel):
         self.py_env_frame = self._create_env_page(py_frame, "python3", "Python 是运行本程序的必要环境", None)
         
         # 重新检测按钮
-        ttk.Button(env_frame, text="重新检测全部", command=self.refresh_all_env).pack(pady=5)
+        ttk.Button(env_frame, text="重新检测全部", command=self.refresh_all_env).grid(row=1, column=0, pady=5)
         
         # 保存按钮
         btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+        btn_frame.grid(row=1, column=0, sticky=tk.E, padx=10, pady=10)
         ttk.Button(btn_frame, text="保存", command=self.save_settings).pack(side=tk.RIGHT, padx=5)
         ttk.Button(btn_frame, text="取消", command=self.destroy).pack(side=tk.RIGHT, padx=5)
     
@@ -1081,6 +1140,7 @@ class SettingsWindow(tk.Toplevel):
         self.config_manager.set("skip_live", self.skip_live_var.get())
         self.config_manager.set("link_subtitle_keyword", self.link_subtitle_keyword_var.get())
         self.config_manager.set("link_subtitle_format", self.link_subtitle_format_var.get())
+        self.config_manager.set("legacy_server_connect", self.legacy_server_connect_var.get())
         
         self.config_manager.set("default_checks", {
             "video": self.video_check_var.get(),
@@ -1349,6 +1409,9 @@ class ProgressWindow(tk.Toplevel):
         if force:
             # 强制覆盖已有文件，确保重试真正重新下载
             cmd.extend(["--force-overwrites", "--no-continue"])
+        
+        if self.config_manager.get("legacy_server_connect", False):
+            cmd.extend(["--legacy-server-connect"])
         
         if no_playlist:
             # 只下载当前视频，不下载播放列表
