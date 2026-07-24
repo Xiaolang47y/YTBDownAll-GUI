@@ -87,6 +87,8 @@ def set_config_dir(new_dir):
 class ConfigManager:
     """配置管理器"""
     
+    _lock = threading.Lock()
+    
     def __init__(self):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         history_dir = DEFAULT_CONFIG.get("history_dir", "")
@@ -112,16 +114,19 @@ class ConfigManager:
     def save(self):
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, indent=2, ensure_ascii=False)
+            with self._lock:
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"保存配置失败: {e}")
     
     def get(self, key, default=None):
-        return self.config.get(key, default)
+        with self._lock:
+            return self.config.get(key, default)
     
     def set(self, key, value):
-        self.config[key] = value
+        with self._lock:
+            self.config[key] = value
         self.save()
 
 
@@ -1228,6 +1233,14 @@ class ProgressWindow(tk.Toplevel):
             self.log_text.insert(tk.END, message + "\n", tag)
         else:
             self.log_text.insert(tk.END, message + "\n")
+        
+        # 限制日志行数，防止长时间下载后内存与 UI 卡顿
+        max_log_lines = 5000
+        total_lines = int(self.log_text.index('end-1c').split('.')[0])
+        if total_lines > max_log_lines:
+            delete_to = f"{total_lines - max_log_lines + 1}.0"
+            self.log_text.delete("1.0", delete_to)
+        
         if self.auto_scroll:
             self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
@@ -1237,11 +1250,7 @@ class ProgressWindow(tk.Toplevel):
     
     def abort_download(self):
         self.running = False
-        if self.current_process and self.current_process.poll() is None:
-            try:
-                self.current_process.terminate()
-            except:
-                pass
+        self._cleanup_process(self.current_process, timeout=3)
         self.abort_btn.config(state=tk.DISABLED)
         self.skip_btn.config(state=tk.DISABLED)
         self.log("用户中止下载...", "error")
@@ -1258,43 +1267,80 @@ class ProgressWindow(tk.Toplevel):
         else:
             self.log("当前没有正在下载的项", "warning")
     
+    def _cleanup_process(self, proc, timeout=5):
+        """安全清理子进程，防止僵尸进程与文件描述符泄漏"""
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=timeout)
+        except Exception:
+            pass
+        finally:
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                if proc.stderr:
+                    proc.stderr.close()
+            except Exception:
+                pass
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+    
     def start_download(self):
         thread = threading.Thread(target=self.download_thread, daemon=True)
         thread.start()
     
     def download_thread(self):
-        total = len(self.download_items)
-        success = 0
-        failed = 0
-        
-        for i, item in enumerate(self.download_items, 1):
-            if not self.running:
-                break
+        try:
+            total = len(self.download_items)
+            success = 0
+            failed = 0
             
-            self.after(0, lambda msg=f"[{i}/{total}] 开始下载: {item['url']}": self.progress_label.config(text=msg))
-            self.after(0, lambda msg=f"\n{'='*60}\n[{i}/{total}] {item['url']}\n{'='*60}": self.log(msg))
+            for i, item in enumerate(self.download_items, 1):
+                if not self.running:
+                    break
+                
+                self.after(0, lambda msg=f"[{i}/{total}] 开始下载: {item['url']}": self.progress_label.config(text=msg))
+                self.after(0, lambda msg=f"\n{'='*60}\n[{i}/{total}] {item['url']}\n{'='*60}": self.log(msg))
+                
+                result = self.download_item(item)
+                self.results.append(result)
+                self.skip_current = False
+                self.current_process = None
+                
+                if result.get('live'):
+                    # 直播跳过，计入失败但显示特殊信息
+                    failed += 1
+                    self.after(0, lambda msg=f"✗ 检测到直播，跳过下载: {result.get('title', '未知标题')}": self.log(msg, "error"))
+                elif result['success']:
+                    success += 1
+                    self.after(0, lambda msg=f"✓ 下载成功: {result.get('title', '未知标题')}": self.log(msg, "success"))
+                else:
+                    failed += 1
+                    self.after(0, lambda msg=f"✗ 下载失败: {result.get('error', '未知错误')}": self.log(msg, "error"))
             
-            result = self.download_item(item)
-            self.results.append(result)
-            self.skip_current = False
-            self.current_process = None
+            # 显示结果列表
+            self.show_results(success, failed)
             
-            if result.get('live'):
-                # 直播跳过，计入失败但显示特殊信息
-                failed += 1
-                self.after(0, lambda msg=f"✗ 检测到直播，跳过下载: {result.get('title', '未知标题')}": self.log(msg, "error"))
-            elif result['success']:
-                success += 1
-                self.after(0, lambda msg=f"✓ 下载成功: {result.get('title', '未知标题')}": self.log(msg, "success"))
-            else:
-                failed += 1
-                self.after(0, lambda msg=f"✗ 下载失败: {result.get('error', '未知错误')}": self.log(msg, "error"))
-        
-        # 显示结果列表
-        self.show_results(success, failed)
-        
-        # 置顶完成提示
-        self.after(0, lambda: self.show_completion_dialog(success, failed))
+            # 置顶完成提示
+            self.after(0, lambda: self.show_completion_dialog(success, failed))
+        except Exception as e:
+            import traceback
+            err_msg = f"下载线程发生未处理异常: {e}\n{traceback.format_exc()}"
+            print(err_msg)
+            self.after(0, lambda msg=err_msg: self.log(msg, "error"))
+            self.after(0, lambda: messagebox.showerror("错误", f"下载过程中发生错误:\n{e}\n\n请查看日志或终端输出获取详细信息。", parent=self))
     
     def show_completion_dialog(self, success, failed):
         bring_to_front(self)
@@ -1326,7 +1372,7 @@ class ProgressWindow(tk.Toplevel):
         self.save_history()
         
         # 更新按钮状态
-        remaining_failed = len([r for r in self.results if not r['success'] and not r.get('skipped')])
+        remaining_failed = len([r for r in self.results if not r['success'] and not r.get('skipped') and not r.get('live')])
         if remaining_failed > 0:
             self.retry_btn.config(state=tk.NORMAL)
         else:
@@ -1471,12 +1517,11 @@ class ProgressWindow(tk.Toplevel):
             
             title = None
             sub_downloaded = False
+            terminated = False
             for line in self.current_process.stdout:
-                if not self.running:
-                    self.current_process.terminate()
-                    break
-                if self.skip_current:
-                    self.current_process.terminate()
+                if not self.running or self.skip_current:
+                    terminated = True
+                    self._cleanup_process(self.current_process, timeout=3)
                     break
                 line = line.rstrip()
                 if not line:
@@ -1505,10 +1550,14 @@ class ProgressWindow(tk.Toplevel):
                 else:
                     self.after(0, lambda msg=line: self.log(msg))
             
-            self.current_process.wait()
+            if not terminated:
+                self._cleanup_process(self.current_process, timeout=10)
             
             if self.skip_current:
                 return {"success": False, "url": url, "title": title or "未知标题", "error": "用户终止当前下载项", "has_sub": has_subs}
+            
+            if not self.running:
+                return {"success": False, "url": url, "title": title or "未知标题", "error": "用户中止下载", "has_sub": has_subs}
             
             if self.current_process.returncode == 0:
                 if not title:
@@ -1588,8 +1637,10 @@ class ProgressWindow(tk.Toplevel):
             history_files = history_files[1:]
     
     def retry_failed(self):
-        failed_items = [r for r in self.results if not r['success']]
+        # 仅重试真正失败的项，跳过直播/用户跳过/用户中止的项
+        failed_items = [r for r in self.results if not r['success'] and not r.get('skipped') and not r.get('live')]
         if not failed_items:
+            self.log("没有可重试的失败项（直播或已跳过的项不会重试）", "warning")
             return
         
         self.retry_btn.config(state=tk.DISABLED)
@@ -1599,35 +1650,42 @@ class ProgressWindow(tk.Toplevel):
         thread.start()
     
     def retry_thread(self, failed_items):
-        success = 0
-        failed = 0
-        
-        for item in failed_items:
-            if not self.running:
-                break
+        try:
+            success = 0
+            failed = 0
             
-            self.after(0, lambda msg=f"\n重试: {item['url']}": self.log(msg))
-            
-            original = next((i for i in self.download_items if i['url'] == item['url']), None)
-            if original:
-                result = self.download_item(original, force=True)
-                for r in self.results:
-                    if r['url'] == item['url']:
-                        r.update(result)
-                        break
+            for item in failed_items:
+                if not self.running:
+                    break
                 
-                if result['success']:
-                    success += 1
-                    self.after(0, lambda msg=f"✓ 重试成功: {result.get('title', '未知标题')}": self.log(msg, "success"))
-                else:
-                    failed += 1
-                    self.after(0, lambda msg=f"✗ 重试失败: {result.get('error', '未知错误')}": self.log(msg, "error"))
-        
-        # 刷新结果列表显示
-        total_success = len([r for r in self.results if r['success']])
-        total_failed = len([r for r in self.results if not r['success']])
-        self.after(0, lambda s=total_success, f=total_failed: self.show_results(s, f))
-        self.after(0, lambda: messagebox.showinfo("完成", f"重试完成！\n成功: {success}\n失败: {failed}", parent=self))
+                self.after(0, lambda msg=f"\n重试: {item['url']}": self.log(msg))
+                
+                original = next((i for i in self.download_items if i['url'] == item['url']), None)
+                if original:
+                    result = self.download_item(original, force=True)
+                    for r in self.results:
+                        if r['url'] == item['url']:
+                            r.update(result)
+                            break
+                    
+                    if result['success']:
+                        success += 1
+                        self.after(0, lambda msg=f"✓ 重试成功: {result.get('title', '未知标题')}": self.log(msg, "success"))
+                    else:
+                        failed += 1
+                        self.after(0, lambda msg=f"✗ 重试失败: {result.get('error', '未知错误')}": self.log(msg, "error"))
+            
+            # 刷新结果列表显示
+            total_success = len([r for r in self.results if r['success']])
+            total_failed = len([r for r in self.results if not r['success']])
+            self.after(0, lambda s=total_success, f=total_failed: self.show_results(s, f))
+            self.after(0, lambda: messagebox.showinfo("完成", f"重试完成！\n成功: {success}\n失败: {failed}", parent=self))
+        except Exception as e:
+            import traceback
+            err_msg = f"重试线程发生未处理异常: {e}\n{traceback.format_exc()}"
+            print(err_msg)
+            self.after(0, lambda msg=err_msg: self.log(msg, "error"))
+            self.after(0, lambda: messagebox.showerror("错误", f"重试过程中发生错误:\n{e}\n\n请查看日志或终端输出获取详细信息。", parent=self))
     
     def on_close(self):
         self.running = False
