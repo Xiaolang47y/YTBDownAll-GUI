@@ -65,6 +65,13 @@ DEFAULT_CONFIG = {
     "link_subtitle_keyword": False,  # 是否启用链接行尾字幕关键字识别
     "link_subtitle_format": "srt",  # 行尾字幕关键字识别时默认勾选 SRT 或 VTT
     "legacy_server_connect": False,  # 是否使用 --legacy-server-connect 解决 SSL 握手失败
+    "add_metadata": False,  # 下载视频时是否添加元数据
+    "error_log_enabled": False,  # 是否记录程序错误日志
+    "error_log_count": 5,  # 错误日志文件数量限制
+    "error_log_dir": "",  # 错误日志保存目录，默认使用 CONFIG_DIR/logs/errors
+    "download_log_enabled": False,  # 是否记录下载日志
+    "download_log_count": 5,  # 下载日志文件数量限制
+    "download_log_dir": "",  # 下载日志保存目录，默认使用 CONFIG_DIR/logs/downloads
     "yt_dlp_path": "",
     "ffmpeg_path": "",
     "deno_path": ""
@@ -128,6 +135,55 @@ class ConfigManager:
         with self._lock:
             self.config[key] = value
         self.save()
+
+
+def cleanup_old_logs(log_dir, max_count):
+    """清理超出数量限制的旧日志文件"""
+    try:
+        log_files = sorted(Path(log_dir).glob("*.log"))
+        while len(log_files) > max_count:
+            try:
+                log_files[0].unlink()
+            except OSError:
+                pass
+            log_files = log_files[1:]
+    except Exception:
+        pass
+
+
+def write_error_log(config_manager, message):
+    """写入程序错误日志（如启用）"""
+    try:
+        if not config_manager.get("error_log_enabled", False):
+            return
+        error_log_dir = config_manager.get("error_log_dir", "")
+        if not error_log_dir:
+            error_log_dir = str(CONFIG_DIR / "logs" / "errors")
+        Path(error_log_dir).mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = Path(error_log_dir) / f"error_{timestamp}.log"
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]\n{message}\n\n")
+        cleanup_old_logs(error_log_dir, config_manager.get("error_log_count", 5))
+    except Exception:
+        pass
+
+
+def get_download_log_path(config_manager):
+    """获取本次下载日志文件路径（如启用），否则返回 None"""
+    try:
+        if not config_manager.get("download_log_enabled", False):
+            return None
+        download_log_dir = config_manager.get("download_log_dir", "")
+        if not download_log_dir:
+            download_log_dir = str(CONFIG_DIR / "logs" / "downloads")
+        Path(download_log_dir).mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = Path(download_log_dir) / f"download_{timestamp}.log"
+        cleanup_old_logs(download_log_dir, config_manager.get("download_log_count", 5))
+        return log_file
+    except Exception:
+        return None
 
 
 class EnvChecker:
@@ -844,6 +900,13 @@ class SettingsWindow(tk.Toplevel):
         self.legacy_server_connect_var = tk.BooleanVar(value=self.config_manager.get("legacy_server_connect", False))
         ttk.Checkbutton(network_frame, text="使用 --legacy-server-connect（解决 SSLV3_ALERT_HANDSHAKE_FAILURE 错误）", variable=self.legacy_server_connect_var).grid(row=0, column=0, sticky=tk.W, padx=5)
         
+        # 元数据设置
+        metadata_frame = ttk.LabelFrame(download_frame, text="元数据", padding=10)
+        metadata_frame.grid(row=8, column=0, columnspan=3, sticky=tk.W+tk.E, pady=10)
+        
+        self.add_metadata_var = tk.BooleanVar(value=self.config_manager.get("add_metadata", False))
+        ttk.Checkbutton(metadata_frame, text="下载视频时添加元数据（--add-metadata）", variable=self.add_metadata_var).grid(row=0, column=0, sticky=tk.W, padx=5)
+        
         # Cookie 设置
         cookie_frame = ttk.Frame(notebook, padding=10)
         notebook.add(cookie_frame, text="Cookie 设置")
@@ -898,6 +961,42 @@ class SettingsWindow(tk.Toplevel):
         self.history_count_var = tk.IntVar(value=self.config_manager.get("history_count", 1))
         ttk.Spinbox(history_frame, from_=0, to=100, textvariable=self.history_count_var, width=5).pack(anchor=tk.W, pady=5)
         ttk.Label(history_frame, text="(设置为 0 表示不保存历史记录)", foreground="gray").pack(anchor=tk.W)
+        
+        # 日志设置
+        log_frame = ttk.Frame(notebook, padding=10)
+        notebook.add(log_frame, text="日志设置")
+        
+        # 错误日志
+        error_log_frame = ttk.LabelFrame(log_frame, text="程序错误日志", padding=10)
+        error_log_frame.pack(fill=tk.X, pady=5)
+        
+        self.error_log_enabled_var = tk.BooleanVar(value=self.config_manager.get("error_log_enabled", False))
+        ttk.Checkbutton(error_log_frame, text="启用错误日志记录", variable=self.error_log_enabled_var).grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5)
+        
+        ttk.Label(error_log_frame, text="保存目录:").grid(row=1, column=0, sticky=tk.W, pady=5, padx=5)
+        self.error_log_dir_var = tk.StringVar(value=self.config_manager.get("error_log_dir", str(CONFIG_DIR / "logs" / "errors")))
+        ttk.Entry(error_log_frame, textvariable=self.error_log_dir_var, width=40).grid(row=1, column=1, padx=5, pady=5)
+        ttk.Button(error_log_frame, text="浏览", command=self.browse_error_log_dir).grid(row=1, column=2, padx=2, pady=5)
+        
+        ttk.Label(error_log_frame, text="保留文件数量:").grid(row=2, column=0, sticky=tk.W, pady=5, padx=5)
+        self.error_log_count_var = tk.IntVar(value=self.config_manager.get("error_log_count", 5))
+        ttk.Spinbox(error_log_frame, from_=1, to=100, textvariable=self.error_log_count_var, width=5).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        # 下载日志
+        download_log_frame = ttk.LabelFrame(log_frame, text="下载日志", padding=10)
+        download_log_frame.pack(fill=tk.X, pady=5)
+        
+        self.download_log_enabled_var = tk.BooleanVar(value=self.config_manager.get("download_log_enabled", False))
+        ttk.Checkbutton(download_log_frame, text="启用下载日志记录（记录每次下载的完整 yt-dlp 输出）", variable=self.download_log_enabled_var).grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5)
+        
+        ttk.Label(download_log_frame, text="保存目录:").grid(row=1, column=0, sticky=tk.W, pady=5, padx=5)
+        self.download_log_dir_var = tk.StringVar(value=self.config_manager.get("download_log_dir", str(CONFIG_DIR / "logs" / "downloads")))
+        ttk.Entry(download_log_frame, textvariable=self.download_log_dir_var, width=40).grid(row=1, column=1, padx=5, pady=5)
+        ttk.Button(download_log_frame, text="浏览", command=self.browse_download_log_dir).grid(row=1, column=2, padx=2, pady=5)
+        
+        ttk.Label(download_log_frame, text="保留文件数量:").grid(row=2, column=0, sticky=tk.W, pady=5, padx=5)
+        self.download_log_count_var = tk.IntVar(value=self.config_manager.get("download_log_count", 5))
+        ttk.Spinbox(download_log_frame, from_=1, to=100, textvariable=self.download_log_count_var, width=5).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
         
         # 环境检测（可滚动）
         env_frame = self._make_scrollable_tab(notebook, "环境检测")
@@ -976,6 +1075,16 @@ class SettingsWindow(tk.Toplevel):
             subprocess.run(["xdg-open", path])
         else:
             messagebox.showwarning("警告", "目录不存在", parent=self)
+    
+    def browse_error_log_dir(self):
+        path = filedialog.askdirectory(title="选择错误日志保存目录", parent=self)
+        if path:
+            self.error_log_dir_var.set(path)
+    
+    def browse_download_log_dir(self):
+        path = filedialog.askdirectory(title="选择下载日志保存目录", parent=self)
+        if path:
+            self.download_log_dir_var.set(path)
     
     def _create_env_page(self, parent, component, description, path_key, optional=False):
         """创建环境检测页面"""
@@ -1146,6 +1255,13 @@ class SettingsWindow(tk.Toplevel):
         self.config_manager.set("link_subtitle_keyword", self.link_subtitle_keyword_var.get())
         self.config_manager.set("link_subtitle_format", self.link_subtitle_format_var.get())
         self.config_manager.set("legacy_server_connect", self.legacy_server_connect_var.get())
+        self.config_manager.set("add_metadata", self.add_metadata_var.get())
+        self.config_manager.set("error_log_enabled", self.error_log_enabled_var.get())
+        self.config_manager.set("error_log_count", self.error_log_count_var.get())
+        self.config_manager.set("error_log_dir", self.error_log_dir_var.get())
+        self.config_manager.set("download_log_enabled", self.download_log_enabled_var.get())
+        self.config_manager.set("download_log_count", self.download_log_count_var.get())
+        self.config_manager.set("download_log_dir", self.download_log_dir_var.get())
         
         self.config_manager.set("default_checks", {
             "video": self.video_check_var.get(),
@@ -1184,6 +1300,8 @@ class ProgressWindow(tk.Toplevel):
         self.results = []
         self.current_process = None
         self.skip_current = False
+        self.download_log_file = get_download_log_path(config_manager)
+        self.download_log_lock = threading.Lock()
         
         self.create_widgets()
         self.start_download()
@@ -1244,6 +1362,17 @@ class ProgressWindow(tk.Toplevel):
         if self.auto_scroll:
             self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
+    
+    def write_download_log(self, message):
+        """将原始输出写入下载日志文件（如启用）"""
+        if not self.download_log_file:
+            return
+        try:
+            with self.download_log_lock:
+                with open(self.download_log_file, 'a', encoding='utf-8') as f:
+                    f.write(message + "\n")
+        except Exception:
+            pass
     
     def toggle_auto_scroll(self):
         self.auto_scroll = self.auto_scroll_var.get()
@@ -1339,6 +1468,7 @@ class ProgressWindow(tk.Toplevel):
             import traceback
             err_msg = f"下载线程发生未处理异常: {e}\n{traceback.format_exc()}"
             print(err_msg)
+            write_error_log(self.config_manager, err_msg)
             self.after(0, lambda msg=err_msg: self.log(msg, "error"))
             self.after(0, lambda: messagebox.showerror("错误", f"下载过程中发生错误:\n{e}\n\n请查看日志或终端输出获取详细信息。", parent=self))
     
@@ -1378,6 +1508,9 @@ class ProgressWindow(tk.Toplevel):
         else:
             self.retry_btn.config(state=tk.DISABLED)
         self.close_btn.config(state=tk.NORMAL)
+        # 下载完成后禁用中止相关按钮，避免影响重试等后续操作
+        self.abort_btn.config(state=tk.DISABLED)
+        self.skip_btn.config(state=tk.DISABLED)
     
     def check_url_type(self, url):
         """检测 URL 类型，返回 'video'、'live'、'list' 或 'unknown'"""
@@ -1471,6 +1604,8 @@ class ProgressWindow(tk.Toplevel):
         if checks.get("video"):
             cmd.extend(["--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"])
             cmd.extend(["--merge-output-format", "mp4"])
+            if self.config_manager.get("add_metadata", False):
+                cmd.extend(["--add-metadata"])
         
         if checks.get("cover"):
             cmd.extend(["--write-thumbnail", "--convert-thumbnails", "jpg"])
@@ -1495,6 +1630,7 @@ class ProgressWindow(tk.Toplevel):
         
         # 记录执行的命令
         self.after(0, lambda msg=f"执行命令: {' '.join(cmd)}": self.log(msg))
+        self.write_download_log(f"\n{'='*60}\nURL: {url}\n命令: {' '.join(cmd)}\n{'='*60}\n")
         
         # 记录下载前目录中的字幕文件，用于判断本次是否实际下载了字幕
         sub_only = has_subs and not checks.get("video") and not checks.get("audio") and not checks.get("cover")
@@ -1524,6 +1660,7 @@ class ProgressWindow(tk.Toplevel):
                     self._cleanup_process(self.current_process, timeout=3)
                     break
                 line = line.rstrip()
+                self.write_download_log(line)
                 if not line:
                     continue
                 
@@ -1644,6 +1781,9 @@ class ProgressWindow(tk.Toplevel):
             return
         
         self.retry_btn.config(state=tk.DISABLED)
+        # 重试期间恢复中止/跳过按钮，让用户可以中断重试
+        self.abort_btn.config(state=tk.NORMAL)
+        self.skip_btn.config(state=tk.NORMAL)
         self.log("\n开始重试失败项...")
         
         thread = threading.Thread(target=self.retry_thread, args=(failed_items,), daemon=True)
@@ -1684,8 +1824,13 @@ class ProgressWindow(tk.Toplevel):
             import traceback
             err_msg = f"重试线程发生未处理异常: {e}\n{traceback.format_exc()}"
             print(err_msg)
+            write_error_log(self.config_manager, err_msg)
             self.after(0, lambda msg=err_msg: self.log(msg, "error"))
             self.after(0, lambda: messagebox.showerror("错误", f"重试过程中发生错误:\n{e}\n\n请查看日志或终端输出获取详细信息。", parent=self))
+        finally:
+            # 重试结束（无论成功/失败/异常）后再次禁用中止相关按钮
+            self.after(0, lambda: self.abort_btn.config(state=tk.DISABLED))
+            self.after(0, lambda: self.skip_btn.config(state=tk.DISABLED))
     
     def on_close(self):
         self.running = False
@@ -1933,10 +2078,26 @@ class MainApplication(tk.Tk):
         self.config_manager = ConfigManager()
         self.link_items = []
         
+        # 设置全局异常钩子，记录主线程未处理异常
+        self._setup_global_exception_hook()
+        
         if not CONFIG_FILE.exists():
             self.show_first_run_wizard()
         
         self.create_widgets()
+    
+    def _setup_global_exception_hook(self):
+        """设置全局异常钩子，用于捕获并记录未处理异常"""
+        config_manager = self.config_manager
+        original_hook = sys.excepthook
+        
+        def exception_hook(exc_type, exc_value, exc_traceback):
+            import traceback
+            err_msg = f"未处理异常: {exc_type.__name__}: {exc_value}\n{''.join(traceback.format_tb(exc_traceback))}"
+            write_error_log(config_manager, err_msg)
+            original_hook(exc_type, exc_value, exc_traceback)
+        
+        sys.excepthook = exception_hook
     
     def show_first_run_wizard(self):
         wizard = FirstRunWizard(self, self.config_manager)
