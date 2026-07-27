@@ -84,9 +84,6 @@ DEFAULT_CONFIG = {
     "link_subtitle_format": "srt",  # 行尾字幕关键字识别时默认勾选 SRT 或 VTT
     "legacy_server_connect": False,  # 是否使用 --legacy-server-connect 解决 SSL 握手失败
     "add_metadata": False,  # 下载视频时是否添加元数据
-    "error_log_enabled": False,  # 是否记录程序错误日志
-    "error_log_count": 5,  # 错误日志文件数量限制
-    "error_log_dir": "",  # 错误日志保存目录，默认使用 CONFIG_DIR/logs/errors
     "download_log_enabled": False,  # 是否记录下载日志
     "download_log_count": 5,  # 下载日志文件数量限制
     "download_log_dir": "",  # 下载日志保存目录，默认使用 CONFIG_DIR/logs/downloads
@@ -165,24 +162,6 @@ def cleanup_old_logs(log_dir, max_count):
             except OSError:
                 pass
             log_files = log_files[1:]
-    except Exception:
-        pass
-
-
-def write_error_log(config_manager, message):
-    """写入程序错误日志（如启用）"""
-    try:
-        if not config_manager.get("error_log_enabled", False):
-            return
-        error_log_dir = config_manager.get("error_log_dir", "")
-        if not error_log_dir:
-            error_log_dir = str(CONFIG_DIR / "logs" / "errors")
-        Path(error_log_dir).mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = Path(error_log_dir) / f"error_{timestamp}.log"
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]\n{message}\n\n")
-        cleanup_old_logs(error_log_dir, config_manager.get("error_log_count", 5))
     except Exception:
         pass
 
@@ -1026,29 +1005,9 @@ class SettingsWindow(tk.Toplevel):
         ttk.Spinbox(history_frame, from_=0, to=100, textvariable=self.history_count_var, width=5).pack(anchor=tk.W, pady=5)
         ttk.Label(history_frame, text="(设置为 0 表示不保存历史记录)", foreground="gray").pack(anchor=tk.W)
         
-        # 日志设置
-        log_frame = ttk.Frame(notebook, padding=10)
-        notebook.add(log_frame, text="日志设置")
-        
-        # 错误日志
-        error_log_frame = ttk.LabelFrame(log_frame, text="程序错误日志", padding=10)
-        error_log_frame.pack(fill=tk.X, pady=5)
-        
-        self.error_log_enabled_var = tk.BooleanVar(value=self.config_manager.get("error_log_enabled", False))
-        ttk.Checkbutton(error_log_frame, text="启用错误日志记录", variable=self.error_log_enabled_var).grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5)
-        
-        ttk.Label(error_log_frame, text="保存目录:").grid(row=1, column=0, sticky=tk.W, pady=5, padx=5)
-        self.error_log_dir_var = tk.StringVar(value=self.config_manager.get("error_log_dir", str(CONFIG_DIR / "logs" / "errors")))
-        ttk.Entry(error_log_frame, textvariable=self.error_log_dir_var, width=40).grid(row=1, column=1, padx=5, pady=5)
-        ttk.Button(error_log_frame, text="浏览", command=self.browse_error_log_dir).grid(row=1, column=2, padx=2, pady=5)
-        
-        ttk.Label(error_log_frame, text="保留文件数量:").grid(row=2, column=0, sticky=tk.W, pady=5, padx=5)
-        self.error_log_count_var = tk.IntVar(value=self.config_manager.get("error_log_count", 5))
-        ttk.Spinbox(error_log_frame, from_=1, to=100, textvariable=self.error_log_count_var, width=5).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
-        
         # 下载日志
-        download_log_frame = ttk.LabelFrame(log_frame, text="下载日志", padding=10)
-        download_log_frame.pack(fill=tk.X, pady=5)
+        download_log_frame = ttk.LabelFrame(history_frame, text="下载日志", padding=10)
+        download_log_frame.pack(fill=tk.X, pady=10)
         
         self.download_log_enabled_var = tk.BooleanVar(value=self.config_manager.get("download_log_enabled", False))
         ttk.Checkbutton(download_log_frame, text="启用下载日志记录（记录每次下载的完整 yt-dlp 输出）", variable=self.download_log_enabled_var).grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5)
@@ -1139,11 +1098,6 @@ class SettingsWindow(tk.Toplevel):
             subprocess.run(["xdg-open", path])
         else:
             messagebox.showwarning("警告", "目录不存在", parent=self)
-    
-    def browse_error_log_dir(self):
-        path = filedialog.askdirectory(title="选择错误日志保存目录", parent=self)
-        if path:
-            self.error_log_dir_var.set(path)
     
     def browse_download_log_dir(self):
         path = filedialog.askdirectory(title="选择下载日志保存目录", parent=self)
@@ -1320,9 +1274,6 @@ class SettingsWindow(tk.Toplevel):
         self.config_manager.set("link_subtitle_format", self.link_subtitle_format_var.get())
         self.config_manager.set("legacy_server_connect", self.legacy_server_connect_var.get())
         self.config_manager.set("add_metadata", self.add_metadata_var.get())
-        self.config_manager.set("error_log_enabled", self.error_log_enabled_var.get())
-        self.config_manager.set("error_log_count", self.error_log_count_var.get())
-        self.config_manager.set("error_log_dir", self.error_log_dir_var.get())
         self.config_manager.set("download_log_enabled", self.download_log_enabled_var.get())
         self.config_manager.set("download_log_count", self.download_log_count_var.get())
         self.config_manager.set("download_log_dir", self.download_log_dir_var.get())
@@ -1366,10 +1317,11 @@ class ProgressWindow(tk.Toplevel):
         self.skip_current = False
         self.download_log_file = get_download_log_path(config_manager)
         self.download_log_lock = threading.Lock()
-        
+
+        self.transient(parent)
         self.create_widgets()
         self.start_download()
-        
+
         self.protocol("WM_DELETE_WINDOW", self.on_close)
     
     def create_widgets(self):
@@ -1410,22 +1362,40 @@ class ProgressWindow(tk.Toplevel):
         self.close_btn.pack(side=tk.RIGHT, padx=5)
     
     def log(self, message, tag=None):
-        self.log_text.config(state=tk.NORMAL)
-        if tag:
-            self.log_text.insert(tk.END, message + "\n", tag)
-        else:
-            self.log_text.insert(tk.END, message + "\n")
-        
-        # 限制日志行数，防止长时间下载后内存与 UI 卡顿
-        max_log_lines = 5000
-        total_lines = int(self.log_text.index('end-1c').split('.')[0])
-        if total_lines > max_log_lines:
-            delete_to = f"{total_lines - max_log_lines + 1}.0"
-            self.log_text.delete("1.0", delete_to)
-        
-        if self.auto_scroll:
-            self.log_text.see(tk.END)
-        self.log_text.config(state=tk.DISABLED)
+        # 自动将非主线程的日志调用调度到主线程，避免 Tkinter 线程不安全导致段错误
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                if self.winfo_exists():
+                    self.after(0, lambda msg=message, t=tag: self.log(msg, t))
+            except tk.TclError:
+                pass
+            return
+
+        try:
+            if not self.log_text.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
+        try:
+            self.log_text.config(state=tk.NORMAL)
+            if tag:
+                self.log_text.insert(tk.END, message + "\n", tag)
+            else:
+                self.log_text.insert(tk.END, message + "\n")
+
+            # 限制日志行数，防止长时间下载后内存与 UI 卡顿
+            max_log_lines = 5000
+            total_lines = int(self.log_text.index('end-1c').split('.')[0])
+            if total_lines > max_log_lines:
+                delete_to = f"{total_lines - max_log_lines + 1}.0"
+                self.log_text.delete("1.0", delete_to)
+
+            if self.auto_scroll:
+                self.log_text.see(tk.END)
+            self.log_text.config(state=tk.DISABLED)
+        except tk.TclError:
+            pass
     
     def write_download_log(self, message):
         """将原始输出写入下载日志文件（如启用）"""
@@ -1499,19 +1469,19 @@ class ProgressWindow(tk.Toplevel):
             total = len(self.download_items)
             success = 0
             failed = 0
-            
+
             for i, item in enumerate(self.download_items, 1):
                 if not self.running:
                     break
-                
-                self.after(0, lambda msg=f"[{i}/{total}] 开始下载: {item['url']}": self.progress_label.config(text=msg))
+
+                self.after(0, lambda msg=f"[{i}/{total}] 开始下载: {item['url']}": self._safe_set_progress(msg))
                 self.after(0, lambda msg=f"\n{'='*60}\n[{i}/{total}] {item['url']}\n{'='*60}": self.log(msg))
-                
+
                 result = self.download_item(item)
                 self.results.append(result)
                 self.skip_current = False
                 self.current_process = None
-                
+
                 if result.get('live'):
                     # 直播跳过，计入失败但显示特殊信息
                     failed += 1
@@ -1522,59 +1492,78 @@ class ProgressWindow(tk.Toplevel):
                 else:
                     failed += 1
                     self.after(0, lambda msg=f"✗ 下载失败: {result.get('error', '未知错误')}": self.log(msg, "error"))
-            
-            # 显示结果列表
-            self.show_results(success, failed)
-            
+
+            # 显示结果列表（必须在主线程执行，避免 worker 线程直接操作 UI 导致段错误）
+            self.after(0, lambda s=success, f=failed: self.show_results(s, f))
+
             # 置顶完成提示
-            self.after(0, lambda: self.show_completion_dialog(success, failed))
+            self.after(0, lambda s=success, f=failed: self.show_completion_dialog(s, f))
         except Exception as e:
             import traceback
             err_msg = f"下载线程发生未处理异常: {e}\n{traceback.format_exc()}"
             print(err_msg)
-            write_error_log(self.config_manager, err_msg)
+            error_str = str(e)
             self.after(0, lambda msg=err_msg: self.log(msg, "error"))
-            self.after(0, lambda: messagebox.showerror("错误", f"下载过程中发生错误:\n{e}\n\n请查看日志或终端输出获取详细信息。", parent=self))
+            self.after(0, lambda msg=error_str: messagebox.showerror("错误", f"下载过程中发生错误:\n{msg}\n\n请查看日志或终端输出获取详细信息。", parent=self))
+
+    def _safe_set_progress(self, message):
+        """安全更新进度标签，窗口已关闭时直接忽略"""
+        try:
+            if self.progress_label.winfo_exists():
+                self.progress_label.config(text=message)
+        except tk.TclError:
+            pass
     
     def show_completion_dialog(self, success, failed):
-        bring_to_front(self)
-        messagebox.showinfo("完成", f"下载完成！\n成功: {success}\n失败: {failed}", parent=self)
-    
+        try:
+            if not self.winfo_exists():
+                return
+            bring_to_front(self)
+            messagebox.showinfo("完成", f"下载完成！\n成功: {success}\n失败: {failed}", parent=self)
+        except tk.TclError:
+            pass
+
     def show_results(self, success, failed):
         """显示下载结果列表"""
-        self.log(f"\n{'='*60}")
-        self.log(f"下载完成！成功: {success} / 失败: {failed}")
-        self.log(f"{'='*60}\n")
-        self.log("下载列表:")
-        
-        for idx, result in enumerate(self.results, 1):
-            if result.get('live'):
-                # 直播跳过项用红色高亮
-                msg = f"  {idx}. [检测到直播，跳过下载] {result.get('title', '未知标题')} | {result['url']}"
-                self.log(msg, "error")
+        try:
+            if not self.winfo_exists():
+                return
+            self.log(f"\n{'='*60}")
+            self.log(f"下载完成！成功: {success} / 失败: {failed}")
+            self.log(f"{'='*60}\n")
+            self.log("下载列表:")
+
+            for idx, result in enumerate(self.results, 1):
+                if result.get('live'):
+                    # 直播跳过项用红色高亮
+                    msg = f"  {idx}. [检测到直播，跳过下载] {result.get('title', '未知标题')} | {result['url']}"
+                    self.log(msg, "error")
+                else:
+                    status = "✓" if result['success'] else "✗ [失败]"
+                    title = result.get('title', '未知标题')
+                    url = result['url']
+                    has_sub = result.get('has_sub', False)
+                    sub_tag = " [字幕]" if has_sub else ""
+                    self.log(f"  {idx}. {status}{sub_tag} {title} | {url}", "success" if result['success'] else "error")
+
+            if self.progress_label.winfo_exists():
+                self.progress_label.config(text=f"下载完成！成功: {success} / 失败: {failed}")
+
+            # 保存历史记录
+            self.save_history()
+
+            # 更新按钮状态
+            remaining_failed = len([r for r in self.results if not r['success'] and not r.get('skipped') and not r.get('live')])
+            if remaining_failed > 0:
+                self.retry_btn.config(state=tk.NORMAL)
             else:
-                status = "✓" if result['success'] else "✗ [失败]"
-                title = result.get('title', '未知标题')
-                url = result['url']
-                has_sub = result.get('has_sub', False)
-                sub_tag = " [字幕]" if has_sub else ""
-                self.log(f"  {idx}. {status}{sub_tag} {title} | {url}", "success" if result['success'] else "error")
-        
-        self.progress_label.config(text=f"下载完成！成功: {success} / 失败: {failed}")
-        
-        # 保存历史记录
-        self.save_history()
-        
-        # 更新按钮状态
-        remaining_failed = len([r for r in self.results if not r['success'] and not r.get('skipped') and not r.get('live')])
-        if remaining_failed > 0:
-            self.retry_btn.config(state=tk.NORMAL)
-        else:
-            self.retry_btn.config(state=tk.DISABLED)
-        self.close_btn.config(state=tk.NORMAL)
-        # 下载完成后禁用中止相关按钮，避免影响重试等后续操作
-        self.abort_btn.config(state=tk.DISABLED)
-        self.skip_btn.config(state=tk.DISABLED)
+                self.retry_btn.config(state=tk.DISABLED)
+            self.close_btn.config(state=tk.NORMAL)
+            # 下载完成后禁用中止相关按钮，避免影响重试等后续操作
+            self.abort_btn.config(state=tk.DISABLED)
+            self.skip_btn.config(state=tk.DISABLED)
+        except tk.TclError:
+            pass
     
     def check_url_type(self, url):
         """检测 URL 类型，返回 'video'、'live'、'list' 或 'unknown'"""
@@ -1900,7 +1889,6 @@ class ProgressWindow(tk.Toplevel):
             import traceback
             err_msg = f"重试线程发生未处理异常: {e}\n{traceback.format_exc()}"
             print(err_msg)
-            write_error_log(self.config_manager, err_msg)
             self.after(0, lambda msg=err_msg: self.log(msg, "error"))
             self.after(0, lambda: messagebox.showerror("错误", f"重试过程中发生错误:\n{e}\n\n请查看日志或终端输出获取详细信息。", parent=self))
         finally:
@@ -1910,6 +1898,11 @@ class ProgressWindow(tk.Toplevel):
     
     def on_close(self):
         self.running = False
+        try:
+            if self.winfo_exists():
+                self.grab_release()
+        except tk.TclError:
+            pass
         self.destroy()
     
     def show_history(self):
@@ -2171,7 +2164,7 @@ class MainApplication(tk.Tk):
                 return original_hook(exc_type, exc_value, exc_traceback)
             import traceback
             err_msg = f"未处理异常: {exc_type.__name__}: {exc_value}\n{''.join(traceback.format_tb(exc_traceback))}"
-            write_error_log(config_manager, err_msg)
+            print(err_msg, file=sys.stderr)
             original_hook(exc_type, exc_value, exc_traceback)
         
         sys.excepthook = exception_hook
@@ -2183,7 +2176,6 @@ class MainApplication(tk.Tk):
             return
         import traceback
         err_msg = f"tkinter 回调异常: {exc_type.__name__}: {exc_value}\n{''.join(traceback.format_tb(exc_traceback))}"
-        write_error_log(self.config_manager, err_msg)
         # 同时输出到 stderr，便于调试
         print(err_msg, file=sys.stderr)
         # 调用默认处理
@@ -2381,8 +2373,7 @@ class MainApplication(tk.Tk):
             import traceback
             err_msg = f"生成下载列表时发生异常: {e}\n{traceback.format_exc()}"
             print(err_msg)
-            write_error_log(self.config_manager, err_msg)
-            messagebox.showerror("错误", f"生成下载列表时发生错误:\n{e}\n\n错误已记录到日志。", parent=self)
+            messagebox.showerror("错误", f"生成下载列表时发生错误:\n{e}\n\n请查看终端输出获取详细信息。", parent=self)
     
     def select_all(self):
         for item in self.link_items:
@@ -2420,23 +2411,15 @@ class MainApplication(tk.Tk):
                 self.config_manager.set("save_dir", save_dir)
             
             download_items = []
-            invalid_urls = []
             for item in self.link_items:
                 checks = item.get_checks()
-                if not any(checks.values()):
-                    continue
-                if not self._is_valid_url(item.url):
-                    invalid_urls.append(item.url)
-                    continue
-                download_items.append({
-                    "url": item.url,
-                    "checks": checks,
-                    "sub_langs": item.get_sub_langs()
-                })
-
-            if invalid_urls:
-                print(f"开始下载时过滤的无效链接: {invalid_urls}")
-
+                if any(checks.values()):
+                    download_items.append({
+                        "url": item.url,
+                        "checks": checks,
+                        "sub_langs": item.get_sub_langs()
+                    })
+            
             if not download_items:
                 messagebox.showwarning("警告", "没有选择任何下载项", parent=self)
                 return
@@ -2447,8 +2430,7 @@ class MainApplication(tk.Tk):
             import traceback
             err_msg = f"开始下载时发生异常: {e}\n{traceback.format_exc()}"
             print(err_msg)
-            write_error_log(self.config_manager, err_msg)
-            messagebox.showerror("错误", f"开始下载时发生错误:\n{e}\n\n错误已记录到日志。", parent=self)
+            messagebox.showerror("错误", f"开始下载时发生错误:\n{e}\n\n请查看终端输出获取详细信息。", parent=self)
     
     def show_settings(self):
         settings = SettingsWindow(self, self.config_manager)
