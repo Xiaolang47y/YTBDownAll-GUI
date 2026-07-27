@@ -43,6 +43,24 @@ CONFIG_DIR = get_config_dir()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 HISTORY_DIR = CONFIG_DIR / "history"
 
+# 启用 faulthandler，段错误时输出到 crash.log 便于排查
+# 注意：faulthandler.enable 需要真实的文件对象（支持 fileno），因此不再同时 tee 到 stderr，
+# 而是将崩溃日志可靠地写入文件，并在 stderr 中打印日志路径。
+try:
+    import faulthandler
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _crash_log_path = CONFIG_DIR / "crash.log"
+    # faulthandler 在发生段错误时直接写入字节，使用二进制模式避免类型错误
+    _crash_log_file = open(_crash_log_path, "wb")
+    _crash_log_file.write(
+        f"faulthandler enabled at {datetime.now()}\n".encode("utf-8")
+    )
+    _crash_log_file.flush()
+    faulthandler.enable(_crash_log_file)
+    print(f"faulthandler 已启用，崩溃日志将写入: {_crash_log_path}", file=sys.stderr)
+except Exception as e:
+    print(f"faulthandler 启动失败: {e}", file=sys.stderr)
+
 # 默认配置
 DEFAULT_CONFIG = {
     "save_dir": "",
@@ -184,6 +202,30 @@ def get_download_log_path(config_manager):
         return log_file
     except Exception:
         return None
+
+
+def map_sub_langs_for_url(url, sub_langs):
+    """根据站点将字幕语言代码映射为对应站点支持的代码"""
+    lower_url = url.lower()
+    if any(host in lower_url for host in ["bilibili.com", "b23.tv"]):
+        # Bilibili 常见代码：zh-CN、zh-TW、en、ja 等；扩展匹配提高命中率
+        mapping = {
+            "zh-Hans": ["zh-CN", "zh", "zh-Hans"],
+            "zh-Hant": ["zh-TW", "zh-HK", "zh", "zh-Hant"],
+            "zh": ["zh-CN", "zh-TW", "zh"],
+            "en": ["en"],
+            "ja": ["ja"],
+            "ko": ["ko"],
+        }
+        expanded = []
+        seen = set()
+        for lang in sub_langs:
+            for mapped in mapping.get(lang, [lang]):
+                if mapped not in seen:
+                    seen.add(mapped)
+                    expanded.append(mapped)
+        return expanded
+    return sub_langs
 
 
 class EnvChecker:
@@ -754,8 +796,8 @@ class SettingsWindow(tk.Toplevel):
     def __init__(self, parent, config_manager):
         super().__init__(parent)
         self.title("设置")
-        self.geometry("600x720")
-        self.minsize(500, 400)
+        self.geometry("750x620")
+        self.minsize(600, 450)
         self.config_manager = config_manager
         self.parent = parent
         
@@ -773,18 +815,40 @@ class SettingsWindow(tk.Toplevel):
         scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
         inner = ttk.Frame(canvas)
         inner_id = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
-        
+
+        pending_width_update = [None]
+
         def _update_scrollregion(event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        
+            try:
+                if canvas.winfo_exists():
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+            except tk.TclError:
+                pass
+
+        def _do_update_inner_width():
+            pending_width_update[0] = None
+            try:
+                if not canvas.winfo_exists() or not inner.winfo_exists():
+                    return
+                sb_width = scrollbar.winfo_width()
+                if sb_width <= 1:
+                    sb_width = 16  # 滚动条未布局完成前使用保守估计值
+                canvas_width = max(1, canvas.winfo_width() - sb_width)
+                canvas.itemconfig(inner_id, width=canvas_width)
+            except tk.TclError:
+                pass
+
         def _update_inner_width(event=None):
-            # 让 inner 宽度等于 canvas 可见宽度减去滚动条宽度
-            canvas_width = max(1, canvas.winfo_width() - scrollbar.winfo_width())
-            canvas.itemconfig(inner_id, width=canvas_width)
-        
+            if pending_width_update[0] is not None:
+                try:
+                    outer.after_cancel(pending_width_update[0])
+                except tk.TclError:
+                    pass
+            pending_width_update[0] = outer.after(50, _do_update_inner_width)
+
         inner.bind("<Configure>", _update_scrollregion)
-        outer.bind("<Configure>", lambda e: outer.after_idle(_update_inner_width))
-        canvas.bind("<Configure>", lambda e: outer.after_idle(_update_inner_width))
+        outer.bind("<Configure>", lambda e: _update_inner_width())
+        canvas.bind("<Configure>", lambda e: _update_inner_width())
         
         canvas.configure(yscrollcommand=scrollbar.set)
         
@@ -1612,13 +1676,25 @@ class ProgressWindow(tk.Toplevel):
         
         has_subs = checks.get("srt") or checks.get("vtt")
         if has_subs:
-            cmd.extend(["--write-subs", "--write-auto-subs", "--sub-langs", ",".join(sub_langs)])
-            if checks.get("srt") and checks.get("vtt"):
-                cmd.extend(["--sub-format", "srt/vtt/best"])
-            elif checks.get("srt"):
-                cmd.extend(["--sub-format", "srt"])
-            elif checks.get("vtt"):
-                cmd.extend(["--sub-format", "vtt"])
+            # Bilibili 等站点使用不同的字幕语言代码与格式，需要转换
+            is_bilibili = any(host in url.lower() for host in ["bilibili.com", "b23.tv"])
+            actual_sub_langs = map_sub_langs_for_url(url, sub_langs)
+            if not actual_sub_langs:
+                actual_sub_langs = ["en", "zh-Hans"]
+            cmd.extend(["--write-subs", "--write-auto-subs", "--sub-langs", ",".join(actual_sub_langs)])
+            if is_bilibili:
+                # Bilibili 原生字幕多为 JSON，下载后转换为目标格式
+                if checks.get("srt"):
+                    cmd.extend(["--sub-format", "json/best", "--convert-subs", "srt"])
+                elif checks.get("vtt"):
+                    cmd.extend(["--sub-format", "json/best", "--convert-subs", "vtt"])
+            else:
+                if checks.get("srt") and checks.get("vtt"):
+                    cmd.extend(["--sub-format", "srt/vtt/best"])
+                elif checks.get("srt"):
+                    cmd.extend(["--sub-format", "srt/vtt/json/best", "--convert-subs", "srt"])
+                elif checks.get("vtt"):
+                    cmd.extend(["--sub-format", "srt/vtt/json/best", "--convert-subs", "vtt"])
         
         if checks.get("audio"):
             cmd.extend(["--extract-audio", "--audio-format", "mp3"])
@@ -1875,7 +1951,7 @@ class SubLangDialog(tk.Toplevel):
     def __init__(self, parent, selected_langs):
         super().__init__(parent)
         self.title("选择字幕语言")
-        self.geometry("300x250")
+        self.geometry("480x320")
         self.resizable(False, False)
         self.selected_langs = selected_langs.copy() if selected_langs else []
         self.result = None
@@ -1920,15 +1996,12 @@ class SubLangDialog(tk.Toplevel):
         self.destroy()
 
 
-class HeaderRow(tk.Frame):
+class HeaderRow:
     """表头行，包含每列的全选复选框"""
     
-    def __init__(self, parent, default_checks):
-        super().__init__(parent)
+    def __init__(self, parent, row, default_checks):
         self.link_items = []
-        
-        # 标签占位（与链接列对齐）
-        ttk.Label(self, text="", width=50).pack(side=tk.LEFT, padx=5, pady=2)
+        self.parent = parent
         
         # 每列的全选复选框
         self.video_var = tk.BooleanVar(value=default_checks.get("video", True))
@@ -1937,22 +2010,11 @@ class HeaderRow(tk.Frame):
         self.vtt_var = tk.BooleanVar(value=default_checks.get("vtt", False))
         self.audio_var = tk.BooleanVar(value=default_checks.get("audio", False))
         
-        ttk.Checkbutton(self, text="视频", variable=self.video_var, command=self.toggle_video).pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(self, text="封面", variable=self.cover_var, command=self.toggle_cover).pack(side=tk.LEFT, padx=5)
-        
-        # SRT 表头
-        srt_frame = ttk.Frame(self)
-        srt_frame.pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(srt_frame, variable=self.srt_var, command=self.toggle_srt).pack(side=tk.LEFT)
-        ttk.Label(srt_frame, text="SRT").pack(side=tk.LEFT)
-        
-        # VTT 表头
-        vtt_frame = ttk.Frame(self)
-        vtt_frame.pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(vtt_frame, variable=self.vtt_var, command=self.toggle_vtt).pack(side=tk.LEFT)
-        ttk.Label(vtt_frame, text="VTT").pack(side=tk.LEFT)
-        
-        ttk.Checkbutton(self, text="音频", variable=self.audio_var, command=self.toggle_audio).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(parent, text="视频", variable=self.video_var, command=self.toggle_video).grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
+        ttk.Checkbutton(parent, text="封面", variable=self.cover_var, command=self.toggle_cover).grid(row=row, column=2, sticky=tk.W, padx=5, pady=2)
+        ttk.Checkbutton(parent, text="SRT", variable=self.srt_var, command=self.toggle_srt).grid(row=row, column=3, sticky=tk.W, padx=5, pady=2)
+        ttk.Checkbutton(parent, text="VTT", variable=self.vtt_var, command=self.toggle_vtt).grid(row=row, column=4, sticky=tk.W, padx=5, pady=2)
+        ttk.Checkbutton(parent, text="音频", variable=self.audio_var, command=self.toggle_audio).grid(row=row, column=5, sticky=tk.W, padx=5, pady=2)
     
     def add_link_item(self, item):
         self.link_items.append(item)
@@ -1983,15 +2045,17 @@ class HeaderRow(tk.Frame):
             item.audio_var.set(val)
 
 
-class LinkItem(tk.Frame):
+class LinkItem:
     """链接列表项"""
     
-    def __init__(self, parent, url, default_checks, default_sub_langs):
-        super().__init__(parent)
+    def __init__(self, parent, row, url, default_checks, default_sub_langs, dialog_parent=None):
         self.url = url
+        self.parent = parent
+        self.dialog_parent = dialog_parent or parent
         
-        url_label = ttk.Label(self, text=url, width=50, anchor=tk.W)
-        url_label.pack(side=tk.LEFT, padx=5, pady=2)
+        # URL 标签（过长时截断，避免撑开滚动区域）
+        display_url = url if len(url) <= 80 else url[:77] + "..."
+        ttk.Label(parent, text=display_url, anchor=tk.W).grid(row=row, column=0, sticky=tk.W+tk.E, padx=5, pady=2)
         
         self.video_var = tk.BooleanVar(value=default_checks.get("video", True))
         self.cover_var = tk.BooleanVar(value=default_checks.get("cover", True))
@@ -2002,42 +2066,39 @@ class LinkItem(tk.Frame):
         self.srt_langs = default_sub_langs.copy() if default_sub_langs else []
         self.vtt_langs = default_sub_langs.copy() if default_sub_langs else []
         
-        video_frame = ttk.Frame(self)
-        video_frame.pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(video_frame, variable=self.video_var).pack(side=tk.LEFT)
-        ttk.Label(video_frame, text="视频").pack(side=tk.LEFT)
+        # 视频 / 封面 / 音频列：复选框 + 文字标签
+        self._add_labeled_checkbox(parent, row, 1, "视频", self.video_var)
+        self._add_labeled_checkbox(parent, row, 2, "封面", self.cover_var)
         
-        cover_frame = ttk.Frame(self)
-        cover_frame.pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(cover_frame, variable=self.cover_var).pack(side=tk.LEFT)
-        ttk.Label(cover_frame, text="封面").pack(side=tk.LEFT)
-        
-        # SRT 字幕按钮
-        srt_frame = ttk.Frame(self)
-        srt_frame.pack(side=tk.LEFT, padx=5)
+        # SRT 列：复选框 + 语言选择按钮
+        srt_frame = ttk.Frame(parent)
+        srt_frame.grid(row=row, column=3, sticky=tk.W, padx=5, pady=2)
         ttk.Checkbutton(srt_frame, variable=self.srt_var).pack(side=tk.LEFT)
         ttk.Button(srt_frame, text="SRT", command=self.show_srt_langs).pack(side=tk.LEFT)
         
-        # VTT 字幕按钮
-        vtt_frame = ttk.Frame(self)
-        vtt_frame.pack(side=tk.LEFT, padx=5)
+        # VTT 列：复选框 + 语言选择按钮
+        vtt_frame = ttk.Frame(parent)
+        vtt_frame.grid(row=row, column=4, sticky=tk.W, padx=5, pady=2)
         ttk.Checkbutton(vtt_frame, variable=self.vtt_var).pack(side=tk.LEFT)
         ttk.Button(vtt_frame, text="VTT", command=self.show_vtt_langs).pack(side=tk.LEFT)
         
-        audio_frame = ttk.Frame(self)
-        audio_frame.pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(audio_frame, variable=self.audio_var).pack(side=tk.LEFT)
-        ttk.Label(audio_frame, text="音频").pack(side=tk.LEFT)
+        self._add_labeled_checkbox(parent, row, 5, "音频", self.audio_var)
+    
+    def _add_labeled_checkbox(self, parent, row, column, text, variable):
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, column=column, sticky=tk.W, padx=5, pady=2)
+        ttk.Checkbutton(frame, variable=variable).pack(side=tk.LEFT)
+        ttk.Label(frame, text=text).pack(side=tk.LEFT)
     
     def show_srt_langs(self):
-        dialog = SubLangDialog(self, self.srt_langs)
-        self.wait_window(dialog)
+        dialog = SubLangDialog(self.dialog_parent, self.srt_langs)
+        self.dialog_parent.wait_window(dialog)
         if dialog.result is not None:
             self.srt_langs = dialog.result
     
     def show_vtt_langs(self):
-        dialog = SubLangDialog(self, self.vtt_langs)
-        self.wait_window(dialog)
+        dialog = SubLangDialog(self.dialog_parent, self.vtt_langs)
+        self.dialog_parent.wait_window(dialog)
         if dialog.result is not None:
             self.vtt_langs = dialog.result
     
@@ -2051,7 +2112,20 @@ class LinkItem(tk.Frame):
         }
     
     def get_sub_langs(self):
-        return self.srt_langs
+        # 只合并当前已勾选的字幕格式的语言列表，避免未勾选格式仍带入默认语言
+        combined = []
+        seen = set()
+        if self.srt_var.get():
+            for lang in self.srt_langs:
+                if lang not in seen:
+                    seen.add(lang)
+                    combined.append(lang)
+        if self.vtt_var.get():
+            for lang in self.vtt_langs:
+                if lang not in seen:
+                    seen.add(lang)
+                    combined.append(lang)
+        return combined
     
     def get_srt_langs(self):
         return self.srt_langs
@@ -2073,11 +2147,12 @@ class MainApplication(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("YouTube 万能下载器")
-        self.geometry("900x700")
-        
+        self.geometry("1050x700")
+
         self.config_manager = ConfigManager()
         self.link_items = []
-        
+        self._pending_list_width_update = None
+
         # 设置全局异常钩子，记录主线程未处理异常
         self._setup_global_exception_hook()
         
@@ -2092,12 +2167,27 @@ class MainApplication(tk.Tk):
         original_hook = sys.excepthook
         
         def exception_hook(exc_type, exc_value, exc_traceback):
+            if exc_type in (KeyboardInterrupt, SystemExit):
+                return original_hook(exc_type, exc_value, exc_traceback)
             import traceback
             err_msg = f"未处理异常: {exc_type.__name__}: {exc_value}\n{''.join(traceback.format_tb(exc_traceback))}"
             write_error_log(config_manager, err_msg)
             original_hook(exc_type, exc_value, exc_traceback)
         
         sys.excepthook = exception_hook
+    
+    def report_callback_exception(self, exc_type, exc_value, exc_traceback):
+        """捕获 tkinter 回调中的未处理异常并记录"""
+        if exc_type in (KeyboardInterrupt, SystemExit):
+            super().report_callback_exception(exc_type, exc_value, exc_traceback)
+            return
+        import traceback
+        err_msg = f"tkinter 回调异常: {exc_type.__name__}: {exc_value}\n{''.join(traceback.format_tb(exc_traceback))}"
+        write_error_log(self.config_manager, err_msg)
+        # 同时输出到 stderr，便于调试
+        print(err_msg, file=sys.stderr)
+        # 调用默认处理
+        super().report_callback_exception(exc_type, exc_value, exc_traceback)
     
     def show_first_run_wizard(self):
         wizard = FirstRunWizard(self, self.config_manager)
@@ -2120,6 +2210,8 @@ class MainApplication(tk.Tk):
         
         self.link_input = scrolledtext.ScrolledText(input_frame, wrap=tk.WORD, height=10)
         self.link_input.pack(fill=tk.BOTH, expand=True)
+        # 小数字键盘 Enter 也换行
+        self.link_input.bind("<KP_Enter>", lambda e: self.link_input.event_generate("<Return>"))
         
         # 操作按钮
         btn_frame = ttk.Frame(main_frame)
@@ -2138,13 +2230,47 @@ class MainApplication(tk.Tk):
         canvas = tk.Canvas(list_frame)
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=canvas.yview)
         self.scrollable_frame = ttk.Frame(canvas)
+        # 下载列表使用 grid 布局，URL 列可扩展，选择列固定最小宽度
+        self.scrollable_frame.columnconfigure(0, weight=1, minsize=200)
+        self.scrollable_frame.columnconfigure(1, minsize=85)
+        self.scrollable_frame.columnconfigure(2, minsize=85)
+        self.scrollable_frame.columnconfigure(3, minsize=130)
+        self.scrollable_frame.columnconfigure(4, minsize=130)
+        self.scrollable_frame.columnconfigure(5, minsize=85)
         
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
+        inner_id = canvas.create_window((0, 0), window=self.scrollable_frame, anchor=tk.NW)
+
+        self._pending_list_width_update = None
+
+        def _update_scrollregion(event=None):
+            try:
+                if canvas.winfo_exists():
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+            except tk.TclError:
+                pass
+
+        def _do_update_inner_width():
+            self._pending_list_width_update = None
+            try:
+                if not canvas.winfo_exists() or not self.scrollable_frame.winfo_exists():
+                    return
+                canvas_width = max(1, canvas.winfo_width())
+                canvas.itemconfig(inner_id, width=canvas_width)
+            except tk.TclError:
+                pass
+
+        def _update_inner_width(event=None):
+            if self._pending_list_width_update is not None:
+                try:
+                    list_frame.after_cancel(self._pending_list_width_update)
+                except tk.TclError:
+                    pass
+            self._pending_list_width_update = list_frame.after(50, _do_update_inner_width)
+
+        self.scrollable_frame.bind("<Configure>", _update_scrollregion)
+        list_frame.bind("<Configure>", lambda e: _update_inner_width())
+        canvas.bind("<Configure>", lambda e: _update_inner_width())
         
-        canvas.create_window((0, 0), window=self.scrollable_frame, anchor=tk.NW)
         canvas.configure(yscrollcommand=scrollbar.set)
         
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -2170,45 +2296,93 @@ class MainApplication(tk.Tk):
         self.scrollable_frame.bind("<Button-4>", _on_linux_scroll_up)
         self.scrollable_frame.bind("<Button-5>", _on_linux_scroll_down)
     
+    def _is_valid_url(self, url):
+        """简单校验字符串是否为可接受的 URL"""
+        if not url or len(url) < 4:
+            return False
+        return url.startswith(("http://", "https://", "ftp://", "ftps://"))
+    
     def parse_links(self):
-        for widget in self.scrollable_frame.winfo_children():
-            widget.destroy()
-        self.link_items.clear()
-        
-        text = self.link_input.get("1.0", tk.END)
-        raw_lines = [line.strip() for line in text.split('\n') if line.strip()]
-        
-        default_checks = self.config_manager.get("default_checks", {})
-        default_sub_langs = self.config_manager.get("default_sub_langs", ["en", "zh-Hans"])
-        link_subtitle_keyword = self.config_manager.get("link_subtitle_keyword", False)
-        link_subtitle_format = self.config_manager.get("link_subtitle_format", "srt")
-        
-        # 添加表头行（列全选复选框）
-        header = HeaderRow(self.scrollable_frame, default_checks)
-        header.pack(fill=tk.X, pady=2)
-        
-        for line in raw_lines:
-            # 解析行尾字幕关键字
-            url = line
-            has_sub_keyword = False
-            if link_subtitle_keyword:
-                parts = line.split()
-                if len(parts) >= 2 and parts[-1] == "字幕":
-                    url = " ".join(parts[:-1])
-                    has_sub_keyword = True
-            
-            item = LinkItem(self.scrollable_frame, url, default_checks, default_sub_langs)
-            if has_sub_keyword:
-                if link_subtitle_format == "srt":
-                    item.srt_var.set(True)
+        # 取消可能正在进行的宽度更新，避免在清空/重建控件时触发异常
+        if self._pending_list_width_update is not None:
+            try:
+                self.after_cancel(self._pending_list_width_update)
+            except tk.TclError:
+                pass
+            self._pending_list_width_update = None
+
+        try:
+            for widget in list(self.scrollable_frame.winfo_children()):
+                try:
+                    widget.destroy()
+                except tk.TclError:
+                    pass
+            self.link_items.clear()
+
+            text = self.link_input.get("1.0", tk.END)
+            raw_lines = [line.strip() for line in text.split('\n') if line.strip()]
+
+            default_checks = self.config_manager.get("default_checks", {})
+            default_sub_langs = self.config_manager.get("default_sub_langs", ["en", "zh-Hans"])
+            link_subtitle_keyword = self.config_manager.get("link_subtitle_keyword", False)
+            link_subtitle_format = self.config_manager.get("link_subtitle_format", "srt")
+
+            valid_urls = []
+            invalid_lines = []
+            for line in raw_lines:
+                # 解析行尾字幕关键字
+                url = line
+                if link_subtitle_keyword:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[-1] == "字幕":
+                        url = " ".join(parts[:-1])
+
+                if self._is_valid_url(url):
+                    valid_urls.append((url, line))
                 else:
-                    item.vtt_var.set(True)
-            item.pack(fill=tk.X, pady=2)
-            self.link_items.append(item)
-            header.add_link_item(item)
-        
-        if not raw_lines:
-            messagebox.showwarning("警告", "没有找到有效的链接", parent=self)
+                    invalid_lines.append(line)
+
+            if invalid_lines:
+                print(f"跳过的无效链接: {invalid_lines}")
+
+            if not valid_urls:
+                messagebox.showwarning("警告", "没有找到有效的链接", parent=self)
+                return
+
+            # 限制单次解析数量，防止生成过多控件导致界面卡顿或崩溃
+            MAX_LINKS = 1000
+            if len(valid_urls) > MAX_LINKS:
+                skipped = len(valid_urls) - MAX_LINKS
+                messagebox.showwarning(
+                    "警告",
+                    f"链接数量过多（共 {len(valid_urls)} 条），仅显示前 {MAX_LINKS} 条，\n"
+                    f"剩余 {skipped} 条已被忽略。",
+                    parent=self
+                )
+                valid_urls = valid_urls[:MAX_LINKS]
+
+            # 添加表头行（列全选复选框）
+            header = HeaderRow(self.scrollable_frame, 0, default_checks)
+
+            row = 1
+            for url, original_line in valid_urls:
+                has_sub_keyword = link_subtitle_keyword and original_line.endswith(" 字幕")
+
+                item = LinkItem(self.scrollable_frame, row, url, default_checks, default_sub_langs, dialog_parent=self)
+                if has_sub_keyword:
+                    if link_subtitle_format == "srt":
+                        item.srt_var.set(True)
+                    else:
+                        item.vtt_var.set(True)
+                self.link_items.append(item)
+                header.add_link_item(item)
+                row += 1
+        except Exception as e:
+            import traceback
+            err_msg = f"生成下载列表时发生异常: {e}\n{traceback.format_exc()}"
+            print(err_msg)
+            write_error_log(self.config_manager, err_msg)
+            messagebox.showerror("错误", f"生成下载列表时发生错误:\n{e}\n\n错误已记录到日志。", parent=self)
     
     def select_all(self):
         for item in self.link_items:
@@ -2219,38 +2393,62 @@ class MainApplication(tk.Tk):
             item.set_all(False)
     
     def clear_list(self):
-        for widget in self.scrollable_frame.winfo_children():
-            widget.destroy()
+        if self._pending_list_width_update is not None:
+            try:
+                self.after_cancel(self._pending_list_width_update)
+            except tk.TclError:
+                pass
+            self._pending_list_width_update = None
+        for widget in list(self.scrollable_frame.winfo_children()):
+            try:
+                widget.destroy()
+            except tk.TclError:
+                pass
         self.link_items.clear()
         self.link_input.delete("1.0", tk.END)
     
     def start_download(self):
-        if not self.link_items:
-            messagebox.showwarning("警告", "请先解析链接", parent=self)
-            return
-        
-        if self.config_manager.get("ask_save_dir", True):
-            save_dir = filedialog.askdirectory(title="选择保存目录", parent=self)
-            if not save_dir:
+        try:
+            if not self.link_items:
+                messagebox.showwarning("警告", "请先解析链接", parent=self)
                 return
-            self.config_manager.set("save_dir", save_dir)
-        
-        download_items = []
-        for item in self.link_items:
-            checks = item.get_checks()
-            if any(checks.values()):
+            
+            if self.config_manager.get("ask_save_dir", True):
+                save_dir = filedialog.askdirectory(title="选择保存目录", parent=self)
+                if not save_dir:
+                    return
+                self.config_manager.set("save_dir", save_dir)
+            
+            download_items = []
+            invalid_urls = []
+            for item in self.link_items:
+                checks = item.get_checks()
+                if not any(checks.values()):
+                    continue
+                if not self._is_valid_url(item.url):
+                    invalid_urls.append(item.url)
+                    continue
                 download_items.append({
                     "url": item.url,
                     "checks": checks,
                     "sub_langs": item.get_sub_langs()
                 })
-        
-        if not download_items:
-            messagebox.showwarning("警告", "没有选择任何下载项", parent=self)
-            return
-        
-        progress = ProgressWindow(self, download_items, self.config_manager)
-        progress.grab_set()
+
+            if invalid_urls:
+                print(f"开始下载时过滤的无效链接: {invalid_urls}")
+
+            if not download_items:
+                messagebox.showwarning("警告", "没有选择任何下载项", parent=self)
+                return
+            
+            progress = ProgressWindow(self, download_items, self.config_manager)
+            progress.grab_set()
+        except Exception as e:
+            import traceback
+            err_msg = f"开始下载时发生异常: {e}\n{traceback.format_exc()}"
+            print(err_msg)
+            write_error_log(self.config_manager, err_msg)
+            messagebox.showerror("错误", f"开始下载时发生错误:\n{e}\n\n错误已记录到日志。", parent=self)
     
     def show_settings(self):
         settings = SettingsWindow(self, self.config_manager)
