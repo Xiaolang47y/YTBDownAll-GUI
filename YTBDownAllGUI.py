@@ -83,6 +83,7 @@ DEFAULT_CONFIG = {
     "link_subtitle_keyword": False,  # 是否启用链接行尾字幕关键字识别
     "link_subtitle_format": "srt",  # 行尾字幕关键字识别时默认勾选 SRT 或 VTT
     "legacy_server_connect": False,  # 是否使用 --legacy-server-connect 解决 SSL 握手失败
+    "no_check_certificates": False,  # 是否使用 --no-check-certificates 解决部分 SSL/EOF 错误
     "add_metadata": False,  # 下载视频时是否添加元数据
     "download_log_enabled": False,  # 是否记录下载日志
     "download_log_count": 5,  # 下载日志文件数量限制
@@ -943,6 +944,9 @@ class SettingsWindow(tk.Toplevel):
         self.legacy_server_connect_var = tk.BooleanVar(value=self.config_manager.get("legacy_server_connect", False))
         ttk.Checkbutton(network_frame, text="使用 --legacy-server-connect（解决 SSLV3_ALERT_HANDSHAKE_FAILURE 错误）", variable=self.legacy_server_connect_var).grid(row=0, column=0, sticky=tk.W, padx=5)
         
+        self.no_check_certificates_var = tk.BooleanVar(value=self.config_manager.get("no_check_certificates", False))
+        ttk.Checkbutton(network_frame, text="忽略 SSL 证书验证（--no-check-certificates，可解决部分 SSL/EOF 错误，但降低安全性）", variable=self.no_check_certificates_var).grid(row=1, column=0, sticky=tk.W, padx=5)
+        
         # 元数据设置
         metadata_frame = ttk.LabelFrame(download_frame, text="元数据", padding=10)
         metadata_frame.grid(row=8, column=0, columnspan=3, sticky=tk.W+tk.E, pady=10)
@@ -1273,6 +1277,7 @@ class SettingsWindow(tk.Toplevel):
         self.config_manager.set("link_subtitle_keyword", self.link_subtitle_keyword_var.get())
         self.config_manager.set("link_subtitle_format", self.link_subtitle_format_var.get())
         self.config_manager.set("legacy_server_connect", self.legacy_server_connect_var.get())
+        self.config_manager.set("no_check_certificates", self.no_check_certificates_var.get())
         self.config_manager.set("add_metadata", self.add_metadata_var.get())
         self.config_manager.set("download_log_enabled", self.download_log_enabled_var.get())
         self.config_manager.set("download_log_count", self.download_log_count_var.get())
@@ -1645,13 +1650,17 @@ class ProgressWindow(tk.Toplevel):
         if self.config_manager.get("legacy_server_connect", False):
             cmd.extend(["--legacy-server-connect"])
         
+        if self.config_manager.get("no_check_certificates", False):
+            cmd.extend(["--no-check-certificates"])
+        
         if no_playlist:
             # 只下载当前视频，不下载播放列表
             cmd.extend(["--no-playlist"])
             self.after(0, lambda msg="检测到视频列表参数，仅下载当前视频": self.log(msg))
         
         save_dir = self.config_manager.get("save_dir", os.getcwd())
-        output_template = os.path.join(save_dir, "%(title)s.%(ext)s")
+        # 限制标题长度，避免日文/中文等长标题导致文件名超出文件系统限制
+        output_template = os.path.join(save_dir, "%(title).80s.%(ext)s")
         cmd.extend(["-o", output_template])
         
         if checks.get("video"):
